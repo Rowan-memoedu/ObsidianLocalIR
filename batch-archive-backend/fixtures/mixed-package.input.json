@@ -1,0 +1,122 @@
+{
+  "schema": "progressive-reading.local-ir-batch-archive-input/v1",
+  "record": {
+    "path": "staging/canary-mixed.md",
+    "originalSourcePath": "reading/canary-mixed.md",
+    "archivedSourcePath": "archive/canary-mixed.md",
+    "title": "Canary 混合类型包",
+    "status": "done",
+    "completedAt": "2026-08-22T00:00:00.000Z"
+  },
+  "source": {
+    "materialType": "web_article",
+    "format": "web-markdown",
+    "origin": "https://example.com/canary"
+  },
+  "sourceContent": "---\nsource_url: https://example.com/canary\n---\n\n# Canary 混合类型包\n",
+  "paths": {
+    "markdownExportPath": "queue/canary-mixed.md",
+    "packageJsonPath": "queue/canary-mixed.json",
+    "refinedReadingPath": "artifacts/canary-mixed-refined.md",
+    "questionQueueJsonPath": "questions/canary-mixed.json",
+    "questionQueueMarkdownPath": "questions/canary-mixed.md"
+  },
+  "annotations": [
+    {
+      "id": "annotation-remnote",
+      "index": 1,
+      "type": "comment",
+      "typeLabel": "普通评论",
+      "route": "remnote",
+      "targetDocument": "普通评论",
+      "importable": true,
+      "originalText": "普通评论原文",
+      "currentText": "普通评论原文",
+      "commentMarkdown": "普通评论正文"
+    },
+    {
+      "id": "annotation-refined",
+      "index": 2,
+      "type": "highlight",
+      "typeLabel": "仅高亮",
+      "route": "refined_reading",
+      "targetDocument": null,
+      "importable": false,
+      "highlightOnly": true,
+      "originalText": "二次阅读摘录",
+      "currentText": "二次阅读摘录"
+    },
+    {
+      "id": "annotation-question",
+      "index": 3,
+      "type": "question",
+      "typeLabel": "提问",
+      "route": "codex_question_queue",
+      "targetDocument": null,
+      "importable": false,
+      "originalText": "为什么导出不等于正式归档？",
+      "currentText": "为什么导出不等于正式归档？",
+      "commentMarkdown": "请解释 receipt 边界。"
+    },
+    {
+      "id": "annotation-derived-card",
+      "index": 4,
+      "type": "qa_card",
+      "typeLabel": "问答卡",
+      "route": "remnote_card",
+      "targetDocument": "问答卡",
+      "importable": false,
+      "originalText": "只有 receipt 才能证明正式归档。",
+      "currentText": "只有 receipt 才能证明正式归档。"
+    },
+    {
+      "id": "annotation-cloze-source",
+      "index": 5,
+      "type": "highlight",
+      "typeLabel": "仅高亮",
+      "route": "refined_reading",
+      "targetDocument": null,
+      "importable": false,
+      "highlightOnly": true,
+      "markKind": "cloze",
+      "originalText": "receipt",
+      "currentText": "receipt"
+    }
+  ],
+  "cards": [
+    {
+      "id": "card-article",
+      "source": "article",
+      "sourceAnnotationId": null,
+      "questionMarkdown": "何时算正式归档？",
+      "answerMarkdown": "RemNote 写入并回读，成功 receipt 落盘后。",
+      "needsQuestionGeneration": false,
+      "needsAnswerGeneration": false,
+      "cardMarkdown": "- 何时算正式归档？ >>>\n    - RemNote 写入并回读，成功 receipt 落盘后。"
+    },
+    {
+      "id": "card-derived",
+      "source": "annotation",
+      "sourceAnnotationId": "annotation-derived-card",
+      "questionMarkdown": "导出包是否等于正式归档？",
+      "answerMarkdown": "不等于。",
+      "needsQuestionGeneration": false,
+      "needsAnswerGeneration": false,
+      "cardMarkdown": "- 导出包是否等于正式归档？ >>>\n    - 不等于。"
+    }
+  ],
+  "clozeCards": [
+    {
+      "id": "cloze-1",
+      "sourceAnnotationId": "annotation-cloze-source",
+      "clozeMarkdown": "只有 {{receipt}} 才能证明正式归档。"
+    }
+  ],
+  "articleMusings": [
+    {
+      "id": "musing-1",
+      "bodyMarkdown": "状态权威必须单一。",
+      "aiStatus": "pending"
+    }
+  ]
+}

@@ -1,0 +1,9 @@
+{
+  "id": "local-ir",
+  "name": "渐进阅读 Local IR",
+  "version": "0.8.9",
+  "minAppVersion": "1.5.1",
+  "description": "Local incremental reading with receipt-gated native-v2 export packages.",
+  "author": "Codex",
+  "isDesktopOnly": true
+}

@@ -1,0 +1,35 @@
+﻿{
+  "name": "local-incremental-reading",
+  "version": "0.8.9",
+  "description": "Local incremental reading queue for prepared Markdown files in Obsidian.",
+  "main": "main.js",
+  "scripts": {
+    "build": "node esbuild.config.mjs production",
+    "dev": "node esbuild.config.mjs",
+    "test": "node test/metric-presets.test.mjs && node test/priority-initialization-race.test.mjs && node test/priority-scheduling.test.mjs && node test/archive-text.test.mjs && node test/frontend-baseline.test.mjs && node test/link-import-interface.test.mjs && node test/editor-gestures.test.mjs && node test/document-state-defer.test.mjs && node --test batch-archive-backend/test/*.test.mjs",
+    "priority-init:canary": "node canary/run-priority-initialization-canary.mjs",
+    "batch-archive:test": "node --test batch-archive-backend/test/*.test.mjs",
+    "batch-archive:canary": "node batch-archive-backend/canary/run-offline-canary.mjs",
+    "batch-archive:canary:real": "node batch-archive-backend/canary/run-real-material-canary.cjs",
+    "batch-archive:canary:button": "node batch-archive-backend/canary/run-button-handler-canary.cjs",
+    "batch-archive:diagnose:production": "node batch-archive-backend/canary/diagnose-production-failures.cjs",
+    "batch-archive:check": "node --check batch-archive-backend/core.mjs && node --check batch-archive-backend/canary/run-offline-canary.mjs && node --check batch-archive-backend/canary/run-real-material-canary.cjs && node --check batch-archive-backend/canary/run-button-handler-canary.cjs && node --check batch-archive-backend/canary/diagnose-production-failures.cjs && node --test batch-archive-backend/test/*.test.mjs"
+  },
+  "keywords": [
+    "obsidian",
+    "incremental-reading",
+    "markdown"
+  ],
+  "author": "Codex",
+  "license": "MIT",
+  "devDependencies": {
+    "@codemirror/state": "^6.5.0",
+    "@codemirror/view": "^6.38.6",
+    "@types/node": "^20.17.10",
+    "builtin-modules": "^3.3.0",
+    "esbuild": "^0.24.0",
+    "obsidian": "^1.7.2",
+    "typescript": "^5.6.3"
+  }
+}
+
