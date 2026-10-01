@@ -170,8 +170,10 @@ test('save failures surface to callers and a later request can retry', async () 
 
 test('autosave touches only the current document and does not rebuild the sidebar', async () => {
   const p = plugin(), path = 'reading/a.md', saves = [];
+  p.app = { workspace: { activeEditor: null } };
+  p.readVaultFile = async () => 'synthetic source';
   p.settings.records[path] = makeRecord(path);
-  p.settings.annotations.a = { id: 'a', path, sourceFormat: 'virtual', type: 'comment', commentMarkdown: '' };
+  p.settings.annotations.a = { id: 'a', path, sourceFormat: 'virtual', type: 'comment', commentMarkdown: '', virtualRanges: [], fragments: [], headingPath: [] };
   p.saveSettings = async options => saves.push(options);
   p.refreshViews = async () => { throw new Error('draft rebuilt the sidebar'); };
   await p.saveAnnotationDraft({ ...p.settings.annotations.a, commentMarkdown: 'draft', rewriteMarkdown: '' });

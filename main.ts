@@ -30,6 +30,7 @@ import type {
   QaCardRecord,
   ReadingStatus,
   RecentHighlightAction,
+  RecentHighlightMergeAction,
   RecentVirtualHighlightRedoAction,
   TextRange
 } from "./types";
@@ -105,7 +106,6 @@ import {
   resolveQaQuestion,
   resolveSelectionHierarchy,
   roulette,
-  sameTextRanges,
   sanitizeFileName,
   scanLegacyHighlights,
   shortHash,
@@ -119,15 +119,17 @@ import {
 import { AnnotationModal, NoRemnoteContentConfirmationModal, QaCardModal } from "./modals";
 import { CoalescedAsyncTask } from "./async-work";
 import {
-  DEFAULT_METRIC_VALUE,
   MAX_METRIC_VALUE,
   isDefaultMetricInitialization,
   parseReadingMetricPreset,
   reconcileReadingMetricPreset,
   snapMetricValue
 } from "./metric-presets";
-import { Editor, Menu, Notice, Plugin, TFile, TFolder, normalizePath, requestUrl } from "obsidian";
+import { Editor, Menu, Notice, Plugin, TFile, TFolder, editorInfoField, normalizePath, requestUrl } from "obsidian";
 import { EditorView, ViewUpdate } from "@codemirror/view";
+import { history, isolateHistory, undo, redo, undoDepth } from "@codemirror/commands";
+import { ChangeSet, EditorState, Transaction } from "@codemirror/state";
+import { annotationHistoryEffect, applyAnnotationEntries, mappedAnnotationChange, type AnnotationHistoryEntry } from "./annotation-history";
 import {
   INPUT_SCHEMA as BATCH_ARCHIVE_INPUT_SCHEMA,
   PACKAGE_STATUS as EXPORT_PACKAGE_READY,
@@ -150,6 +152,9 @@ import {
   localIrRefreshEffect
 } from "./editor-integration";
 import { documentStateFileName, indexByDocument } from "./document-state";
+import { captureReadingPosition, restoreReadingPosition } from "./reading-position";
+import { applyGuideEdits, guideBodyProjection, planReadingGuideUpdate, splitGuideDocument, textHash } from "./reading-guide";
+import { startGuideJob } from "./reading-guide-client";
 import {
   getMarkdownBlockRangeAtOffset,
   isPlainRedoShortcut,
@@ -184,6 +189,8 @@ export default class LocalIncrementalReadingPlugin extends Plugin {
   localIrServicePort: number | null = null;
   lastHandledActiveFilePath: string | null | undefined;
   readingHighlightTimer: number | undefined;
+  readingPositionTimer: number | undefined;
+  readingGuideJobs = new Map<string, () => void>();
 
   async onload() {
     await this.loadSettings();
@@ -194,7 +201,7 @@ export default class LocalIncrementalReadingPlugin extends Plugin {
       VIEW_TYPE_LOCAL_IR,
       (leaf) => new LocalIRView(leaf, this)
     );
-    this.registerEditorExtension(createVirtualHighlightExtension(this));
+    this.registerEditorExtension(this.getEditorExtensions());
     this.registerReadingHighlights();
 
     this.addRibbonIcon("list-checks", "Local Incremental Reading", () => {
@@ -215,7 +222,7 @@ export default class LocalIncrementalReadingPlugin extends Plugin {
 
     this.addCommand({
       id: "undo-local-incremental-reading-highlight",
-      name: "Undo last incremental reading highlight",
+      name: "Undo",
       callback: () => void this.undoRecentHighlight()
     });
 
@@ -249,6 +256,14 @@ export default class LocalIncrementalReadingPlugin extends Plugin {
     this.registerEvent(this.app.workspace.on("active-leaf-change", () => {
       window.setTimeout(() => void this.handleActiveFileChange(), 0);
     }));
+    this.registerEvent(this.app.workspace.on("file-open", file => {
+      window.clearTimeout(this.readingPositionTimer);
+      if (!file) return;
+      const openedPath = file.path;
+      this.readingPositionTimer = window.setTimeout(() => restoreReadingPosition(this.app.workspace, openedPath, this.settings.records[openedPath]?.readingPosition), 120);
+    }));
+    this.register(() => window.clearTimeout(this.readingPositionTimer));
+    this.register(() => { for (const cancel of this.readingGuideJobs.values()) cancel(); });
     this.registerEvent(this.app.workspace.on("url-menu", (menu, url) => {
       this.addUrlImportMenuItems(menu, url);
     }));
@@ -290,6 +305,16 @@ export default class LocalIncrementalReadingPlugin extends Plugin {
     this.app.workspace.revealLeaf(leaf);
   }
 
+  getEditorExtensions() {
+    return createVirtualHighlightExtension(this);
+  }
+
+  // Read-only diagnostic seam: detached runtime tests must use Obsidian's exact
+  // module instances, not another copy from node_modules or a hidden loader.
+  getEditorRuntime() {
+    return { EditorState, EditorView, editorInfoField, history, isolateHistory, undoDepth, Transaction };
+  }
+
   async loadSettings() {
     const data = await this.loadData();
     const previousVersion = Number(data?.settingsVersion || 0);
@@ -329,6 +354,7 @@ export default class LocalIncrementalReadingPlugin extends Plugin {
       settingsVersion: PLUGIN_DATA_VERSION,
       readingFolder: readingFolders[0],
       readingFolders,
+      activeReadingPoolFolder: typeof data?.activeReadingPoolFolder === "string" ? normalizePath(data.activeReadingPoolFolder) : null,
       defaultDeferDays: clamp(data?.defaultDeferDays ?? DEFAULT_SETTINGS.defaultDeferDays, 1, 365),
       archiveFolder: normalizePath(data?.archiveFolder || DEFAULT_ARCHIVE_FOLDER),
       sourceArchiveFolder: normalizePath(data?.sourceArchiveFolder || DEFAULT_SOURCE_ARCHIVE_FOLDER),
@@ -742,6 +768,24 @@ export default class LocalIncrementalReadingPlugin extends Plugin {
 
   getPrimaryReadingFolder(): string {
     return this.getReadingFolders()[0] || DEFAULT_FOLDER;
+  }
+
+  async setActiveReadingPoolFolder(folder: string | null) {
+    const normalized = folder ? normalizePath(folder) : null;
+    if (normalized && (!this.getReadingFolders().some(root => normalized === root || normalized.startsWith(`${root}/`)) ||
+      !(this.app.vault.getAbstractFileByPath(normalized) instanceof TFolder))) {
+      new Notice("请选择阅读区内的一个现有文件夹。");
+      return;
+    }
+    this.settings.activeReadingPoolFolder = normalized;
+    await this.saveSettings({ flushDocumentStateSidecars: false });
+    await this.refreshViews();
+    new Notice(normalized ? `后续抽取限定为：${normalized}（含子文件夹）` : "已恢复全部阅读池抽取。");
+  }
+
+  isPathInActiveReadingPool(path: string): boolean {
+    const folder = this.settings.activeReadingPoolFolder;
+    return !folder || path.startsWith(`${folder}/`);
   }
 
   getActiveFolderPath(): string | null {
@@ -1202,6 +1246,7 @@ export default class LocalIncrementalReadingPlugin extends Plugin {
     const today = todayKey();
     return this.getRecords().filter((record) => {
       if (!this.isRecordReadable(record)) return false;
+      if (!this.isPathInActiveReadingPool(record.path)) return false;
       if (!this.settings.excludeVisitedToday) return true;
       return !isDateOnDay(record.lastVisited, today);
     });
@@ -1326,6 +1371,7 @@ export default class LocalIncrementalReadingPlugin extends Plugin {
     if (this.isRecordFrozenForExport(path)) return;
     const record = this.settings.records[path];
     if (!record) return;
+    record.readingPosition = captureReadingPosition(this.app.workspace, path) || record.readingPosition;
     const targetPath = this.getCompletedSourceTargetPath(record);
     const movedPath = await this.moveVaultFilePath(path, targetPath);
     if (!movedPath) {
@@ -1364,6 +1410,68 @@ export default class LocalIncrementalReadingPlugin extends Plugin {
     await this.openRecord(movedPath, false);
     await this.refreshViews();
     new Notice(`已完成阅读，原文已归入待归档区：${movedPath}`);
+  }
+
+  async generateReadingGuide(filePath: string) {
+    if (this.readingGuideJobs.has(filePath) || this.isRecordFrozenForExport(filePath)) return;
+    const record = this.settings.records[filePath];
+    const file = this.app.vault.getAbstractFileByPath(filePath);
+    if (!record || !(file instanceof TFile)) return;
+    // Reserve before the first await, including the local preparation phase.
+    this.readingGuideJobs.set(filePath, () => {});
+    let auditDir = "";
+    try {
+      const source = this.getActiveEditorForPath(filePath)?.getValue() ?? await this.app.vault.read(file);
+      const parts = splitGuideDocument(source);
+      const projection = guideBodyProjection(parts.body);
+      if (!projection.text.trim()) throw new Error("正文为空，未生成导读卡。");
+      auditDir = path.join("D:/Artifacts/ObsidianLocalIR/reading-guides", `${Date.now()}-${textHash(filePath).slice(0, 12)}`);
+      await fs.mkdir(auditDir, { recursive: true });
+      await fs.writeFile(path.join(auditDir, "original.md"), source, { flag: "wx" });
+      const metadata = this.app.metadataCache.getFileCache(file)?.frontmatter || {};
+      const job = this.startReadingGuideJob({ markdown: projection.text, title: record.title, materialId: metadata.material_id,
+        sourceUrl: metadata.source_url, originalUrl: metadata.original_url,
+        workflowRoot: this.settings.preprocessingProjectPath || DEFAULT_SETTINGS.preprocessingProjectPath,
+        outputDir: auditDir, cacheDir: "D:/Caches/ProgressiveReading/preprocess" });
+      this.readingGuideJobs.set(filePath, job.cancel);
+      await this.refreshViews();
+      new Notice("正在单独生成导读卡；不会重新抓取、翻译或整理正文。");
+      const result = await job.result;
+      const plan = planReadingGuideUpdate(source, result);
+      if (this.isRecordFrozenForExport(filePath) || this.settings.records[filePath] !== record || file.path !== filePath) throw new Error("文档状态或位置已变化；生成结果已保留，未覆盖文件。");
+      const editor = this.getActiveEditorForPath(filePath);
+      const current = editor?.getValue() ?? await this.app.vault.read(file);
+      if (textHash(current) !== plan.sourceHash) throw new Error("生成期间文章已被编辑；生成结果已保留，未覆盖文件。");
+      const view = getCodeMirrorView(editor);
+      if (view) {
+        view.dispatch({ changes: plan.edits, annotations: [isolateHistory.of("full"), Transaction.userEvent.of("input.local-ir-guide")] });
+      } else {
+        const next = applyGuideEdits(source, plan.edits);
+        const change = mappedAnnotationChange(Object.values(this.settings.annotations), filePath, ChangeSet.of(plan.edits, source.length, "\n"), source, next);
+        await this.app.vault.process(file, stored => {
+          if (textHash(stored) !== plan.sourceHash) throw new Error("文章已发生并发编辑，未覆盖文件。");
+          return next;
+        });
+        this.settings.annotations = Object.fromEntries(LocalIrDocumentCore.applyChange(Object.values(this.settings.annotations), change, "forward", { path: filePath }).map((annotation: AnnotationRecord) => [annotation.id, annotation]));
+        this.rememberHighlightAction({ kind: "merge", path: filePath, beforeContent: source, afterContent: next,
+          beforeAnnotations: change.before, mergedIds: change.ids, change });
+      }
+      await this.saveSettings({ documentPaths: [filePath] });
+      this.refreshVirtualHighlights(filePath);
+      await fs.writeFile(path.join(auditDir, "publication.json"), JSON.stringify({ path: filePath, before: plan.sourceHash,
+        after: textHash(applyGuideEdits(source, plan.edits)), body: plan.bodyHash, stages: result.stages, processorVersion: result.processorVersion }, null, 2), { flag: "wx" });
+      new Notice("导读卡已更新；正文文字及原有指标保持不变。");
+    } catch (error) {
+      new Notice(error instanceof Error ? error.message : "导读卡生成失败。");
+      if (auditDir) console.info(`Local IR guide audit: ${auditDir}`);
+    } finally {
+      this.readingGuideJobs.delete(filePath);
+      await this.refreshViews();
+    }
+  }
+
+  startReadingGuideJob(input: Record<string, unknown>) {
+    return startGuideJob(input);
   }
 
   async batchArchiveDoneRecords() {
@@ -1669,6 +1777,7 @@ export default class LocalIncrementalReadingPlugin extends Plugin {
     const record = this.settings.records[path];
     if (!record || this.isRecordFrozenForExport(path)) return;
     record.metrics[metric] = snapMetricValue(value);
+    record.metricsBeforeExtreme = null;
     record.metricsEditedByUser = true;
     record.priority = this.calculatePriority(record.metrics);
     await this.saveSettings({ flushDocumentStateSidecars: false });
@@ -1678,9 +1787,16 @@ export default class LocalIncrementalReadingPlugin extends Plugin {
   async setExtremeImportance(path: string, enabled: boolean) {
     const record = this.settings.records[path];
     if (!record || this.isRecordFrozenForExport(path)) return;
-    const value = enabled ? MAX_METRIC_VALUE : DEFAULT_METRIC_VALUE;
-    for (const metric of Object.keys(METRIC_LABELS) as MetricKey[]) {
-      record.metrics[metric] = value;
+    if (enabled) {
+      if (!record.metricsBeforeExtreme) record.metricsBeforeExtreme = { ...record.metrics };
+      for (const metric of Object.keys(METRIC_LABELS) as MetricKey[]) record.metrics[metric] = MAX_METRIC_VALUE;
+    } else if (record.metricsBeforeExtreme) {
+      record.metrics = { ...record.metricsBeforeExtreme };
+      record.metricsBeforeExtreme = null;
+    } else {
+      new Notice("这条旧记录没有保存开启前的指标；已保留当前数值，请手动调整。");
+      await this.refreshViews();
+      return;
     }
     record.metricsEditedByUser = true;
     record.priority = this.calculatePriority(record.metrics);
@@ -1850,6 +1966,10 @@ export default class LocalIncrementalReadingPlugin extends Plugin {
       new Notice("导出包已冻结，当前加工记录只读。");
       return;
     }
+    if (existing && !options?.applyRewrite && existing.type === annotation.type && existing.currentText === annotation.currentText &&
+      existing.commentMarkdown === annotation.commentMarkdown && existing.rewriteMarkdown === annotation.rewriteMarkdown) return;
+    const before = existing ? cloneAnnotation(existing) : null;
+    const beforeContent = this.getActiveEditorForPath(annotation.path)?.getValue() ?? await this.readVaultFile(annotation.path);
     let next = normalizeAnnotation(annotation.id, annotation);
     const rewriteText = next.rewriteMarkdown.trim();
     if (options?.applyRewrite && rewriteText) {
@@ -1885,6 +2005,7 @@ export default class LocalIncrementalReadingPlugin extends Plugin {
     next.sourceFormat = next.renderMode === "virtual_decoration" ? "virtual" : "mark";
     next = await this.refreshAnnotationHierarchy(next);
     this.settings.annotations[next.id] = next;
+    if (before && beforeContent !== null) this.rememberAnnotationEdit(before, next, beforeContent);
     this.refreshVirtualHighlights();
     await this.saveSettings({ documentPaths: [next.path] });
     await this.refreshViews();
@@ -1930,6 +2051,10 @@ export default class LocalIncrementalReadingPlugin extends Plugin {
     const existing = this.settings.annotations[annotation.id];
     if (!existing || annotation.sourceFormat === "legacy") return;
     if (this.isRecordFrozenForExport(existing.path)) return;
+    if (existing.type === normalizeAnnotationType(annotation.type) && existing.commentMarkdown === annotation.commentMarkdown && existing.rewriteMarkdown === annotation.rewriteMarkdown) return;
+    const content = this.getActiveEditorForPath(annotation.path)?.getValue() ?? await this.readVaultFile(annotation.path);
+    if (this.settings.annotations[annotation.id] !== existing || this.isRecordFrozenForExport(existing.path)) return;
+    const before = cloneAnnotation(existing);
 
     const next = normalizeAnnotation(annotation.id, {
       ...existing,
@@ -1940,6 +2065,7 @@ export default class LocalIncrementalReadingPlugin extends Plugin {
       updatedAt: new Date().toISOString()
     });
     this.settings.annotations[next.id] = next;
+    if (content !== null) this.rememberAnnotationEdit(before, next, content);
     await this.saveSettings({ documentPaths: [next.path] });
     // The modal owns its draft; refresh the sidebar once on close, not per keystroke.
   }
@@ -1982,7 +2108,7 @@ export default class LocalIncrementalReadingPlugin extends Plugin {
     if (!path || this.app.workspace.getActiveFile()?.path !== path) return;
     const actions = undo ? this.recentHighlightActions : this.recentVirtualHighlightRedoActions;
     const index = findLastIndex(actions, action => action.path === path);
-    if (!isUndoableVirtualHighlightAction(actions[index], path, view.previewMode?.renderer?.text)) return;
+    if (!this.getHistoryViewForPath(path) && !isUndoableVirtualHighlightAction(actions[index], path, view.previewMode?.renderer?.text)) return;
     event.preventDefault();
     event.stopPropagation();
     void (undo ? this.undoRecentHighlight() : this.redoRecentVirtualHighlight(path));
@@ -2303,7 +2429,7 @@ export default class LocalIncrementalReadingPlugin extends Plugin {
     }
     this.refreshVirtualHighlights();
     this.clearVirtualHighlightRedoActions(path);
-    this.recentHighlightActions.push({
+    this.rememberHighlightAction({
       kind: "merge",
       path,
       beforeContent: options?.undoBeforeContent ?? content,
@@ -2312,7 +2438,6 @@ export default class LocalIncrementalReadingPlugin extends Plugin {
       change: LocalIrDocumentCore.createChange(Object.values(beforeAnnotations).filter(Boolean), [this.settings.annotations[primaryId]], "merge"),
       mergedIds: uniqueIds
     });
-    this.recentHighlightActions = this.recentHighlightActions.slice(-20);
     await this.saveSettings();
     await this.refreshViews();
     if (!options?.silent) new Notice(`已合并 ${uniqueIds.length} 条高亮。`);
@@ -2742,7 +2867,7 @@ export default class LocalIncrementalReadingPlugin extends Plugin {
     for (const oldId of normalized.overlappingIds) delete this.settings.annotations[oldId];
     this.settings.annotations[modalAnnotation.id] = modalAnnotation;
     this.clearVirtualHighlightRedoActions(workingFile.path);
-    this.recentHighlightActions.push({
+    this.rememberHighlightAction({
       kind: "merge",
       path: workingFile.path,
       beforeContent: content,
@@ -2751,7 +2876,6 @@ export default class LocalIncrementalReadingPlugin extends Plugin {
       change: LocalIrDocumentCore.createChange(prior, [modalAnnotation], "add"),
       mergedIds: [...normalized.overlappingIds, modalAnnotation.id].filter((item, index, array) => item && array.indexOf(item) === index)
     });
-    this.recentHighlightActions = this.recentHighlightActions.slice(-20);
     this.refreshVirtualHighlights();
     await this.saveSettings();
     await this.refreshViews();
@@ -2770,6 +2894,11 @@ export default class LocalIncrementalReadingPlugin extends Plugin {
       return;
     }
     if (this.isRecordFrozenForExport(activePath)) return;
+    const nativeView = this.getHistoryViewForPath(activePath);
+    if (nativeView) {
+      try { undo(nativeView); } catch (error) { this.reportHistoryConflict(error); }
+      return;
+    }
     while (true) {
       const actionIndex = findLastIndex(this.recentHighlightActions, (action) => action.path === activePath);
       if (actionIndex < 0) break;
@@ -2844,12 +2973,11 @@ export default class LocalIncrementalReadingPlugin extends Plugin {
     if (!isPlainUndoShortcut(event)) return false;
     const path = getEditorViewPath(view);
     if (!path) return false;
-    const actionIndex = findLastIndex(this.recentHighlightActions, (action) => action.path === path);
-    const action = actionIndex >= 0 ? this.recentHighlightActions[actionIndex] : undefined;
-    if (!isUndoableVirtualHighlightAction(action, path, view.state.doc.toString())) return false;
     event.preventDefault();
     event.stopPropagation();
-    void this.undoRecentHighlight();
+    if (!this.isRecordFrozenForExport(path)) {
+      try { undo(view); } catch (error) { this.reportHistoryConflict(error); }
+    }
     return true;
   }
 
@@ -2857,18 +2985,22 @@ export default class LocalIncrementalReadingPlugin extends Plugin {
     if (!isPlainRedoShortcut(event)) return false;
     const path = getEditorViewPath(view);
     if (!path) return false;
-    const actionIndex = findLastIndex(this.recentVirtualHighlightRedoActions, (action) => action.path === path);
-    const action = actionIndex >= 0 ? this.recentVirtualHighlightRedoActions[actionIndex] : undefined;
-    if (!isUndoableVirtualHighlightAction(action, path, view.state.doc.toString())) return false;
     event.preventDefault();
     event.stopPropagation();
-    void this.redoRecentVirtualHighlight(path);
+    if (!this.isRecordFrozenForExport(path)) {
+      try { redo(view); } catch (error) { this.reportHistoryConflict(error); }
+    }
     return true;
   }
 
   async redoRecentVirtualHighlight(path: string) {
     if (this.app.workspace.getActiveFile()?.path !== path) return;
     if (this.isRecordFrozenForExport(path)) return;
+    const nativeView = this.getHistoryViewForPath(path);
+    if (nativeView) {
+      try { redo(nativeView); } catch (error) { this.reportHistoryConflict(error); }
+      return;
+    }
     const actionIndex = findLastIndex(this.recentVirtualHighlightRedoActions, (action) => action.path === path);
     if (actionIndex < 0) return;
     const action = this.recentVirtualHighlightRedoActions[actionIndex];
@@ -2892,6 +3024,41 @@ export default class LocalIncrementalReadingPlugin extends Plugin {
 
   clearVirtualHighlightRedoActions(path: string) {
     this.recentVirtualHighlightRedoActions = this.recentVirtualHighlightRedoActions.filter((action) => action.path !== path);
+  }
+
+  reportHistoryConflict(error: unknown) {
+    console.error("Local IR history conflict", error);
+    new Notice("记录存在外部修改或已冻结，本次撤销未执行。");
+  }
+
+  rememberHighlightAction(action: RecentHighlightMergeAction) {
+    const view = this.getHistoryViewForPath(action.path);
+    if (view && action.change && action.beforeContent === action.afterContent) {
+      view.dispatch({ effects: annotationHistoryEffect.of({ path: action.path, change: action.change, direction: "forward", replay: false }),
+        annotations: [isolateHistory.of("full"), Transaction.userEvent.of("input.local-ir")] });
+      return;
+    }
+    this.clearVirtualHighlightRedoActions(action.path);
+    this.recentHighlightActions.push(action);
+    this.recentHighlightActions = this.recentHighlightActions.slice(-100);
+  }
+
+  rememberAnnotationEdit(before: AnnotationRecord, after: AnnotationRecord, content: string) {
+    const change = LocalIrDocumentCore.createChange([before], [after], "annotation-edit");
+    if (!change.ids.length) return;
+    this.rememberHighlightAction({ kind: "merge", path: after.path, beforeContent: content, afterContent: content,
+      beforeAnnotations: change.before, mergedIds: change.ids, change });
+  }
+
+  applyEditorAnnotationEntries(entries: AnnotationHistoryEntry[]) {
+    const records = applyAnnotationEntries(Object.values(this.settings.annotations), entries);
+    this.settings.annotations = Object.fromEntries(records.map((record: AnnotationRecord) => [record.id, record]));
+    const paths = [...new Set(entries.map(entry => entry.path))];
+    // The editor update already rebuilds decorations; never dispatch recursively.
+    void this.saveSettings({ documentPaths: paths }).then(() => { this.refreshReadingHighlights(); return this.refreshViews(); }).catch(error => {
+      console.error("Local IR could not persist editor history", error);
+      new Notice("加工记录保存失败；请勿关闭 Obsidian，稍后重试保存。");
+    });
   }
 
   scheduleReconcile(path: string, content: string) {
@@ -3085,6 +3252,20 @@ export default class LocalIncrementalReadingPlugin extends Plugin {
     return active.editor;
   }
 
+  getHistoryViewForPath(path: string): EditorView | null {
+    const active = getCodeMirrorView(this.getActiveEditorForPath(path));
+    if (active) return active;
+    // Reading mode may retain a source editor. Reuse its history only when it
+    // represents the exact displayed document, never a stale/other leaf.
+    for (const leaf of this.app.workspace.getLeavesOfType?.("markdown") || []) {
+      const readingView = leaf.view as any;
+      if (readingView.file?.path !== path) continue;
+      const view = getCodeMirrorView(readingView.editor || null);
+      if (view && view.state.doc.toString() === readingView.previewMode?.renderer?.text) return view;
+    }
+    return null;
+  }
+
   refreshVirtualHighlights(expectedPath?: string) {
     this.refreshReadingHighlights();
     const activePath = this.app.workspace.getActiveFile()?.path;
@@ -3098,27 +3279,8 @@ export default class LocalIncrementalReadingPlugin extends Plugin {
 
   mapVirtualRangesForEditorChange(path: string, update: ViewUpdate) {
     if (this.isRecordFrozenForExport(path)) return;
-    let changed = false;
-    for (const annotation of this.getAnnotationsForPath(path)) {
-      if (annotation.renderMode !== "virtual_decoration" || annotation.orphaned) continue;
-      const mapped = normalizeTextRanges(getAnnotationVirtualRanges(annotation)
-        .map((range) => ({
-          start: update.changes.mapPos(range.start, 1),
-          end: update.changes.mapPos(range.end, -1)
-        }))
-        .filter((range) => range.end > range.start));
-      if (sameTextRanges(mapped, getAnnotationVirtualRanges(annotation))) continue;
-      annotation.virtualRanges = mapped;
-      annotation.range = mapped[0] ? { ...mapped[0] } : null;
-      annotation.sourceOffset = mapped[0]?.start ?? null;
-      annotation.lineRange = mapped[0] ? getLineRangeForOffsets(update.state.doc.toString(), mapped[0].start, mapped[mapped.length - 1].end) : null;
-      annotation.orphaned = mapped.length === 0;
-      annotation.updatedAt = new Date().toISOString();
-      changed = true;
-    }
-    if (!changed) return;
-    window.clearTimeout(this.virtualRangeSaveTimer);
-    this.virtualRangeSaveTimer = window.setTimeout(() => void this.saveSettings(), 450);
+    const change = mappedAnnotationChange(Object.values(this.settings.annotations), path, update.changes, update.startState?.doc.toString() ?? null, update.state.doc.toString());
+    if (change.ids.length) this.applyEditorAnnotationEntries([{ path, change, direction: "forward", replay: true }]);
   }
 
   async readVaultFile(path: string): Promise<string | null> {
@@ -3139,9 +3301,8 @@ export default class LocalIncrementalReadingPlugin extends Plugin {
     const result = LocalIrDocumentCore.deleteRecords(Object.values(this.settings.annotations), [id], { path: annotation.path });
     this.settings.annotations = Object.fromEntries(result.records.map((record: AnnotationRecord) => [record.id, record]));
     this.clearVirtualHighlightRedoActions(annotation.path);
-    this.recentHighlightActions.push({ kind: "merge", path: annotation.path, beforeContent: content, afterContent: content,
+    this.rememberHighlightAction({ kind: "merge", path: annotation.path, beforeContent: content, afterContent: content,
       beforeAnnotations: result.change.before, mergedIds: [id], change: result.change });
-    this.recentHighlightActions = this.recentHighlightActions.slice(-20);
     this.refreshVirtualHighlights(annotation?.path);
     await this.saveSettings();
     await this.refreshViews();

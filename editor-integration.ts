@@ -4,6 +4,7 @@ import { Editor, TFile, editorInfoField } from "obsidian";
 import { Prec, RangeSetBuilder, StateEffect } from "@codemirror/state";
 import { clampRangeIndex, getAnnotationVirtualRanges } from "./model";
 import { isWholeBlockHighlightGesture } from "./editor-gestures";
+import { createAnnotationHistoryExtension, entriesFromTransactions } from "./annotation-history";
 
 export const localIrRefreshEffect = StateEffect.define<void>();
 
@@ -21,12 +22,11 @@ export function createVirtualHighlightExtension(plugin: LocalIncrementalReadingP
     }
 
     update(update: ViewUpdate) {
-      const path = getEditorViewPath(update.view);
-      if (update.docChanged && path) {
-        plugin.mapVirtualRangesForEditorChange(path, update);
-      }
+      const entries = entriesFromTransactions(update.transactions);
+      if (entries.some(entry => entry.replay)) plugin.applyEditorAnnotationEntries(entries);
       const shouldRefresh = update.docChanged ||
         update.viewportChanged ||
+        entries.length > 0 ||
         update.transactions.some((transaction) => transaction.effects.some((effect) => effect.is(localIrRefreshEffect)));
       if (shouldRefresh) {
         this.decorations = buildVirtualHighlightDecorations(plugin, update.view);
@@ -61,7 +61,7 @@ export function createVirtualHighlightExtension(plugin: LocalIncrementalReadingP
       }
     }
   });
-  return [historyShortcutExtension, decorationExtension];
+  return [createAnnotationHistoryExtension(plugin, state => state.field(editorInfoField, false)?.file?.path || null), historyShortcutExtension, decorationExtension];
 }
 
 export function buildVirtualHighlightDecorations(plugin: LocalIncrementalReadingPlugin, view: EditorView): DecorationSet {

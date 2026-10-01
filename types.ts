@@ -160,6 +160,8 @@ export interface DocRecord {
   status: ReadingStatus;
   metrics: MetricValues;
   metricsEditedByUser: boolean;
+  metricsBeforeExtreme?: MetricValues | null;
+  readingPosition?: { cursor?: { line: number; ch: number }; scroll?: number; savedAt: string } | null;
   metricPresetCheckedMtime: number | null;
   priority: number;
   visitCount: number;
@@ -398,6 +400,8 @@ export interface LocalIRSettings {
   settingsVersion: number;
   readingFolder: string;
   readingFolders: string[];
+  activeReadingPoolFolder: string | null;
+  preprocessingProjectPath: string;
   excludeVisitedToday: boolean;
   absolutePriorityProbability: number;
   defaultDeferDays: number;

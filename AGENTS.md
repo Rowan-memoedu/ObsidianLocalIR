@@ -3,6 +3,7 @@
 - 唯一活动源码：`D:\Projects\ObsidianLocalIR`；`main` 跟踪独立私有仓库的 `origin/main`。旧工作区路径只是 junction，不建立第二份源码或 worktree。
 - 机制与意图权威说明：`docs/ARCHITECTURE.md`；操作说明：`README.md`；历史变化：`CHANGELOG.md`。
 - 本项目负责 Obsidian 本地阅读、加工与导出包。网络抓取、浏览器扩展和 RemNote 正式导入属于其他工程，不因局部优化扩大范围。
+- 用户主动生成/更新导读卡只调用同级标准预处理的 semantic_only 单阶段；禁止重抓取、翻译或重写正文。生成结果校验及发布前源文件哈希检查不可绕过。
 - 同级 `渐进阅读工作流/document-core` 是共享状态/标注算法权威；`remnote-formal-archive` 是正式导入 schema/receipt 权威。禁止在本项目复制一套相似实现。
 - 保留用户手调指标、标注 ID、正文、层级和所有运行数据；修改阅读池不授权清理数据。
 - `export_package_ready` 不等于 `archived`。package commit 后禁止重新加工；不要替用户取消队列或伪造正式 receipt。

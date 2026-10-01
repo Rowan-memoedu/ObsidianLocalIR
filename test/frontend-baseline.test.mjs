@@ -41,7 +41,12 @@ for (const selector of [
 assert.match(main, /type:\s*"range"[\s\S]*?step:\s*"2\.5"/u, "priority controls must expose the five-level range input");
 assert.match(main, /input\.addEventListener\("input",\s*updateMetricControlDisplay\)/u, "range input must update its label immediately");
 assert.match(main, /saveSettings\(\{\s*flushDocumentStateSidecars:\s*false\s*\}\)/u, "metric updates must use the lightweight settings save path");
-assert.match(main, /for \(const input of metricInputs\.values\(\)\) input\.value = String\(value\)/u, "extreme importance must update all range inputs immediately");
+assert.ok(main.includes('record.metrics = { ...record.metricsBeforeExtreme }'), "extreme importance must restore the individual saved values");
+assert.ok(!main.includes('const value = enabled ? MAX_METRIC_VALUE : DEFAULT_METRIC_VALUE'), "cancelling extreme importance must never reset all sliders to medium");
+assert.ok(main.includes('text: "撤销"'), "the user-facing history button is Undo, not undo last highlight");
+assert.ok(main.includes('"30 天", () => this.plugin.deferRecord(record.path, 30)'), "30-day deferral is exposed");
+assert.ok(main.includes('"指定阅读池"'), "manual draw scope is exposed");
+assert.ok(main.includes('"导读卡更新" : "生成导读卡"'), "guide action reflects existing guide metadata/content");
 assert.match(main, /record\.status === "done"[\s\S]*?text:\s*"生成导出包"[\s\S]*?archiveRecord\(record\.path\)/u, "pending-package rows must expose a single-record package button");
 assert.match(main, /singleArchivePathsInProgress = new Set<string>\(\)/u, "single-record package clicks must be guarded against duplicate execution");
 assert.match(main, /class NoRemnoteContentConfirmationModal extends Modal/u, "zero RemNote item packages must require an Obsidian confirmation modal");

@@ -24,6 +24,7 @@ await esbuild.build({
   entryPoints: ["main.ts"],
   absWorkingDir: projectDir,
   bundle: true,
+  define: { __LOCAL_IR_GUIDE_WORKER__: JSON.stringify(fs.readFileSync(path.join(projectDir, "reading-guide-worker.mjs"), "utf8")) },
   external: ["obsidian", "electron", "node:*", "@codemirror/autocomplete", "@codemirror/collab", "@codemirror/commands", "@codemirror/language", "@codemirror/lint", "@codemirror/search", "@codemirror/state", "@codemirror/view", "@lezer/common", "@lezer/highlight", "@lezer/lr", ...builtins],
   format: "cjs",
   target: "es2018",

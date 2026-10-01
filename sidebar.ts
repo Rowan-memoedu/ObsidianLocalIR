@@ -13,10 +13,11 @@ import {
   todayKey,
   truncate
 } from "./model";
-import { DEFAULT_METRIC_VALUE, MAX_METRIC_VALUE, metricLevelLabel, snapMetricValue } from "./metric-presets";
+import { metricLevelLabel, snapMetricValue } from "./metric-presets";
 import { FolderPickerModal, NumberInputModal } from "./modals";
 import { ItemView, Notice, WorkspaceLeaf } from "obsidian";
 import { isExtremePriorityMetrics } from "./priority-scheduling";
+import { hasReadingGuide } from "./reading-guide";
 
 export class LocalIRView extends ItemView {
   plugin: LocalIncrementalReadingPlugin;
@@ -146,7 +147,7 @@ export class LocalIRView extends ItemView {
     });
 
     const undoButton = toolbar.createEl("button", {
-      text: "撤销最近高亮",
+      text: "撤销",
       cls: "local-ir-button"
     });
     undoButton.addEventListener("click", () => void this.plugin.undoRecentHighlight());
@@ -210,6 +211,12 @@ export class LocalIRView extends ItemView {
       }
       void this.plugin.addReadingFolder(folder);
     });
+
+    toolbar.createDiv({ cls: "local-ir-muted", text: `当前抽取范围：${this.plugin.settings.activeReadingPoolFolder || "全部阅读池"}（含子文件夹）` });
+    this.action(toolbar, "指定阅读池", async () => {
+      new FolderPickerModal(this.app, this.plugin, folder => this.plugin.setActiveReadingPoolFolder(folder.path), "选择本次阅读的文件夹", true).open();
+    });
+    if (this.plugin.settings.activeReadingPoolFolder) this.action(toolbar, "恢复全部阅读池", () => this.plugin.setActiveReadingPoolFolder(null));
 
     const moveActiveFileButton = toolbar.createEl("button", {
       text: "当前文件放入阅读池",
@@ -332,9 +339,6 @@ export class LocalIRView extends ItemView {
     extremeInput.checked = isExtremePriorityMetrics(record.metrics);
     extremeInput.addEventListener("change", () => {
       const enabled = extremeInput?.checked === true;
-      const value = enabled ? MAX_METRIC_VALUE : DEFAULT_METRIC_VALUE;
-      for (const input of metricInputs.values()) input.value = String(value);
-      updateMetricControlDisplay();
       void this.plugin.setExtremeImportance(record.path, enabled).catch((error) => {
         console.error(`Local IR: failed to set extreme importance for ${record.path}`, error);
         new Notice("极度重要保存失败，请重试。");
@@ -342,6 +346,15 @@ export class LocalIRView extends ItemView {
     });
 
     const actions = card.createDiv({ cls: "local-ir-toolbar" });
+    if (!this.plugin.isRecordFrozenForExport(record.path)) {
+      const file = this.app.workspace.getActiveFile();
+      const source = this.plugin.getActiveEditorForPath(record.path)?.getValue() ?? await this.plugin.readVaultFile(record.path) ?? "";
+      const metadata = file ? this.app.metadataCache.getFileCache(file)?.frontmatter : undefined;
+      const busy = this.plugin.readingGuideJobs.has(record.path);
+      const guide = actions.createEl("button", { text: busy ? "导读卡生成中…" : hasReadingGuide(source, metadata) ? "导读卡更新" : "生成导读卡", cls: "local-ir-button" });
+      guide.disabled = busy;
+      guide.addEventListener("click", () => void this.plugin.generateReadingGuide(record.path));
+    }
     if (record.status === "archived") {
       actions.createDiv({ cls: "local-ir-muted", text: "正式归档结果由工程五 receipt 回写；插件不直接撤销 RemNote 状态。" });
     } else if (record.status === "export_package_ready") {
@@ -354,6 +367,7 @@ export class LocalIRView extends ItemView {
       this.action(actions, "明天", () => this.plugin.deferRecord(record.path, 1));
       this.action(actions, "3 天", () => this.plugin.deferRecord(record.path, 3));
       this.action(actions, "1 周", () => this.plugin.deferRecord(record.path, 7));
+      this.action(actions, "30 天", () => this.plugin.deferRecord(record.path, 30));
       this.action(actions, "自定义天数", () => {
         new NumberInputModal(this.app, "自定义推迟天数", this.plugin.settings.defaultDeferDays, (days) => this.plugin.deferRecord(record.path, days)).open();
         return Promise.resolve();

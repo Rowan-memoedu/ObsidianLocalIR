@@ -9,6 +9,7 @@ import {
   renderRemNoteMultiLineCard
 } from "./model";
 import { App, FuzzySuggestModal, Modal, Notice, Setting, TFolder } from "obsidian";
+import { isPlainUndoShortcut, isPlainRedoShortcut } from "./editor-gestures";
 
 export class NoRemnoteContentConfirmationModal extends Modal {
   entries: NoRemnoteContentPreflight[];
@@ -62,7 +63,7 @@ export class FolderPickerModal extends FuzzySuggestModal<TFolder> {
   onChoose: (folder: TFolder) => Promise<void>;
   placeholder: string;
 
-  constructor(app: App, plugin: LocalIncrementalReadingPlugin, onChoose: (folder: TFolder) => Promise<void>, placeholder = "搜索并选择阅读池文件夹") {
+  constructor(app: App, plugin: LocalIncrementalReadingPlugin, onChoose: (folder: TFolder) => Promise<void>, placeholder = "搜索并选择阅读池文件夹", private readingOnly = false) {
     super(app);
     this.plugin = plugin;
     this.onChoose = onChoose;
@@ -71,7 +72,8 @@ export class FolderPickerModal extends FuzzySuggestModal<TFolder> {
   }
 
   getItems(): TFolder[] {
-    return this.plugin.getVaultFolders();
+    return this.plugin.getVaultFolders().filter(folder => !this.readingOnly ||
+      this.plugin.getReadingFolders().some(root => folder.path === root || folder.path.startsWith(`${root}/`)));
   }
 
   getItemText(folder: TFolder): string {
@@ -234,7 +236,7 @@ export class AnnotationModal extends Modal {
     contentEl.addClass("local-ir-modal");
     contentEl.createEl("h2", { text: this.annotation.markKind === "cloze" ? "挖空加工" : "高亮加工" });
 
-    let type = this.annotation.type === "highlight" ? "comment" as AnnotationType : normalizeModalAnnotationType(this.annotation.type);
+    let type = this.annotation.type;
     let currentText = this.annotation.currentText || this.annotation.selectedText;
     let commentMarkdown = this.annotation.commentMarkdown;
     let rewriteMarkdown = this.annotation.rewriteMarkdown || "";
@@ -282,7 +284,8 @@ export class AnnotationModal extends Modal {
         cls: "local-ir-type-button"
       });
       typeButtonMap[value] = button;
-      button.addEventListener("click", () => {
+      button.addEventListener("click", async () => {
+        await saveDraftNow();
         const nextType = normalizeModalAnnotationType(value);
         if (!commentMarkdown.trim() || commentMarkdown === annotationTemplate(type)) {
           commentMarkdown = annotationTemplate(nextType);
@@ -290,7 +293,7 @@ export class AnnotationModal extends Modal {
         }
         type = nextType;
         renderTypeButtons();
-        scheduleDraftSave();
+        await saveDraftNow();
       });
     }
     renderTypeButtons();
@@ -336,6 +339,30 @@ export class AnnotationModal extends Modal {
     rewriteInput.addEventListener("input", () => {
       rewriteMarkdown = rewriteInput.value;
       scheduleDraftSave();
+    });
+
+    this.modalEl.addEventListener("keydown", event => {
+      const undo = isPlainUndoShortcut(event);
+      if ((!undo && !isPlainRedoShortcut(event)) || event.target === currentInput) return;
+      event.preventDefault();
+      event.stopPropagation();
+      void (async () => {
+        await saveDraftNow();
+        if (undo) await this.plugin.undoRecentHighlight();
+        else await this.plugin.redoRecentVirtualHighlight(this.annotation.path);
+        const restored = this.plugin.settings.annotations[this.annotation.id];
+        if (!restored) { this.flushDraftSave = null; this.close(); return; }
+        this.annotation = { ...restored };
+        type = restored.type;
+        commentMarkdown = restored.commentMarkdown;
+        rewriteMarkdown = restored.rewriteMarkdown;
+        currentText = restored.currentText;
+        commentInput.value = commentMarkdown;
+        rewriteInput.value = rewriteMarkdown;
+        currentInput.value = currentText;
+        renderTypeButtons();
+        saveStatus.setText(undo ? "已撤销一步" : "已重做一步");
+      })();
     });
 
     const buttonRow = contentEl.createDiv({ cls: "local-ir-modal-buttons" });

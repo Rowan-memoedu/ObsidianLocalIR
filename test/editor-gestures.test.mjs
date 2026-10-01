@@ -81,10 +81,9 @@ assert.ok(source.includes("Prec.highest(EditorView.domEventHandlers"), "virtual 
 const undoHandlerStart = source.indexOf("handleVirtualHighlightUndoShortcut(view: EditorView");
 const undoHandlerEnd = source.indexOf("scheduleReconcile", undoHandlerStart);
 const undoHandler = source.slice(undoHandlerStart, undoHandlerEnd);
-assert.ok(undoHandler.includes("isUndoableVirtualHighlightAction"), "Ctrl+Z must only intercept an eligible virtual highlight action");
-assert.ok(undoHandler.includes("event.preventDefault()"), "eligible virtual Ctrl+Z must suppress native undo");
-assert.ok(undoHandler.includes("void this.undoRecentHighlight()"), "eligible virtual Ctrl+Z must use the existing undo operation");
-assert.ok(undoHandler.includes("void this.redoRecentVirtualHighlight(path)"), "eligible virtual Ctrl+Y must use the virtual redo operation");
+assert.ok(undoHandler.includes("undo(view)"), "Ctrl+Z uses the native history including annotation effects");
+assert.ok(undoHandler.includes("event.preventDefault()"), "Ctrl+Z must run exactly once");
+assert.ok(undoHandler.includes("redo(view)"), "Ctrl+Y uses the same native history");
 assert.ok(source.includes("this.recentVirtualHighlightRedoActions.push"), "virtual undo must preserve the state needed by redo");
 // Record restoration, stale snapshots and unrelated IDs are exercised by
 // document-core/test.mjs against the real plugin methods.
@@ -92,6 +91,7 @@ const undoMethodStart = source.indexOf("async undoRecentHighlight");
 const undoMethodEnd = source.indexOf("handleVirtualHighlightUndoShortcut", undoMethodStart);
 const undoMethod = source.slice(undoMethodStart, undoMethodEnd);
 assert.ok(undoMethod.indexOf("this.refreshVirtualHighlights(activePath)") < undoMethod.indexOf("await this.saveSettings()"), "virtual decoration refresh must happen before settings persistence");
+assert.ok(undoMethod.includes("undo(nativeView)"), "the button uses the identical native undo command");
 const reconcileStart = source.indexOf("async reconcileAnnotationsForPath");
 const reconcileEnd = source.indexOf("async repairActiveFileDangerousMarks", reconcileStart);
 assert.ok(source.slice(reconcileStart, reconcileEnd).includes("this.refreshVirtualHighlights(path)"), "reconcile must refresh decorations after deleting stale records");

@@ -147,6 +147,8 @@ export const DEFAULT_SETTINGS: LocalIRSettings = {
   settingsVersion: PLUGIN_DATA_VERSION,
   readingFolder: DEFAULT_FOLDER,
   readingFolders: [DEFAULT_FOLDER],
+  activeReadingPoolFolder: null,
+  preprocessingProjectPath: "D:/Projects/渐进阅读工作流",
   excludeVisitedToday: true,
   absolutePriorityProbability: 0.2,
   defaultDeferDays: 7,
@@ -913,6 +915,8 @@ export function normalizeRecord(path: string, raw: unknown, weights: MetricWeigh
     status,
     metrics,
     metricsEditedByUser: inferMetricsEditedByUser(metrics, record.metricsEditedByUser),
+    metricsBeforeExtreme: record.metricsBeforeExtreme ? normalizeMetrics(record.metricsBeforeExtreme) : null,
+    readingPosition: normalizeReadingPosition(record.readingPosition),
     metricPresetCheckedMtime: Number.isFinite(record.metricPresetCheckedMtime) ? Number(record.metricPresetCheckedMtime) : null,
     priority: calculatePriorityWithWeights(metrics, weights),
     visitCount: Math.max(0, Math.round(Number(record.visitCount) || 0)),
@@ -942,6 +946,14 @@ export function normalizeRecord(path: string, raw: unknown, weights: MetricWeigh
     documentStateUpdatedAt: record.documentStateUpdatedAt || null,
     documentStateFingerprint: record.documentStateFingerprint || null
   };
+}
+
+export function normalizeReadingPosition(value: DocRecord["readingPosition"]): DocRecord["readingPosition"] {
+  if (!value || typeof value !== "object") return null;
+  const cursor = value.cursor && Number.isFinite(value.cursor.line) && Number.isFinite(value.cursor.ch)
+    ? { line: Math.max(0, Math.floor(value.cursor.line)), ch: Math.max(0, Math.floor(value.cursor.ch)) } : undefined;
+  const scroll = Number.isFinite(value.scroll) ? Math.max(0, value.scroll!) : undefined;
+  return cursor || scroll !== undefined ? { cursor, scroll, savedAt: String(value.savedAt || "") } : null;
 }
 
 export function normalizeArchiveFailureState(value: unknown): ArchiveFailureState | null {

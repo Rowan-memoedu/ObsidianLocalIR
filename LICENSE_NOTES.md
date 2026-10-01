@@ -22,3 +22,10 @@ It reimplements the compatible ideas in a small Obsidian-specific codebase:
 
 If future work copies larger source sections directly, preserve upstream copyright
 headers and re-check the effective license before distribution.
+
+Cursor-position persistence was checked against Obsidian's Editor/ephemeral-state
+API and the MIT-licensed `dy-sh/obsidian-remember-cursor-position` design:
+https://github.com/dy-sh/obsidian-remember-cursor-position . No upstream source
+module is copied; Local IR stores only its own completion position and respects
+explicit navigation. CodeMirror history integration uses its public
+`invertedEffects` / `isolateHistory` APIs, with the runtime supplied by Obsidian.

@@ -362,6 +362,14 @@ export class LocalIRSettingTab extends PluginSettingTab {
             await this.plugin.saveSettings();
           });
       });
+
+    new Setting(containerEl)
+      .setName("标准预处理工程目录")
+      .setDesc("生成/更新导读卡复用此本地工程的 standard-preprocessing 单阶段接口；不重新抓取或翻译正文。")
+      .addText(text => text.setValue(this.plugin.settings.preprocessingProjectPath).onChange(async value => {
+        this.plugin.settings.preprocessingProjectPath = value.trim();
+        await this.plugin.saveSettings({ flushDocumentStateSidecars: false });
+      }));
   }
 }
 

@@ -20,11 +20,13 @@ const code = `(async () => {
   const fs = require('node:fs');
   const reading = await new Function('require','document','window','buildPath','projectPath', fs.readFileSync(${JSON.stringify(path.join(projectDir, 'canary/reading-view.cjs'))}, 'utf8'))(require, document, window, ${JSON.stringify(path.join(paths.buildDir, 'main.js'))}, ${JSON.stringify(projectDir)});
   const palette = new Function('require','document',fs.readFileSync(${JSON.stringify(path.join(projectDir, 'canary/reading-colors.cjs'))}, 'utf8'))(require, document);
+  const editor = await new Function('require','document','window','buildPath','projectPath', fs.readFileSync(${JSON.stringify(path.join(projectDir, 'canary/editor-history.cjs'))}, 'utf8'))(require, document, window, ${JSON.stringify(path.join(paths.buildDir, 'main.js'))}, ${JSON.stringify(projectDir)});
+  assert.equal(editor.status, 'PASS', editor.reason);
   assert.equal(app.workspace.activeLeaf, active);
   assert.equal(app.workspace.getActiveFile(), file);
   const after = document.getSelection();
   if (position) assert.deepEqual([after.anchorNode, after.anchorOffset, after.focusNode, after.focusOffset], position);
-  return JSON.stringify({status:'PASS', reading, palette, loadedVersion:app.plugins.plugins['local-ir']?.manifest.version, activeContextUnchanged:true});
+  return JSON.stringify({status:'PASS', reading, palette, editor, loadedVersion:app.plugins.plugins['local-ir']?.manifest.version, activeContextUnchanged:true});
 })()`;
 const stdout = execFileSync(cli, ['eval', `code=${code}`], { encoding: 'utf8', timeout: 60000, windowsHide: true });
 const result = JSON.parse(stdout.trim().replace(/^=>\s*/, ''));
