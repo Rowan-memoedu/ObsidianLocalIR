@@ -6,12 +6,13 @@ const path = require("node:path");
 const { pathToFileURL } = require("node:url");
 
 const projectRoot = path.resolve(__dirname, "..", "..");
-const workspaceRoot = path.resolve(projectRoot, "..", "..");
+const { artifactRoot, buildDir, requireVaultRoot } = require("../../scripts/paths.cjs");
+const workspaceRoot = requireVaultRoot();
 const installedPluginRoot = path.join(workspaceRoot, ".obsidian", "plugins", "local-ir");
 const installedMainPath = path.join(installedPluginRoot, "main.js");
-const builtMainPath = path.join(projectRoot, "main.js");
+const builtMainPath = path.join(buildDir, "main.js");
 const dataPath = path.join(installedPluginRoot, "data.json");
-const reportPath = path.join(__dirname, "runs", "production-failure-diagnosis-2026-08-23.json");
+const reportPath = path.join(artifactRoot, "diagnostics", `production-failure-${Date.now()}.json`);
 const genericFailureMessage = "批量归档输入未通过生产者校验";
 
 main().catch((error) => {

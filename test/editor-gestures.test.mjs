@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { readPluginSource } from "./plugin-source.mjs";
 import fs from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
@@ -62,7 +63,7 @@ const clickedEditorLine = editorDoc.lineAt(editorDoc.toString().indexOf("第一�
 assert.equal(editorDoc.sliceString(clickedEditorLine.from, clickedEditorLine.to), "第一段。");
 assert.equal(clickedEditorLine.to, "第一段。".length);
 
-const source = fs.readFileSync(path.join(projectDir, "main.ts"), "utf8");
+const source = readPluginSource();
 assert.ok(source.includes("void plugin.highlightWholeBlockAtClick(view, event)"), "Ctrl click must invoke whole-block highlighting");
 const ctrlMethodStart = source.indexOf("async highlightWholeBlockAtClick");
 const ctrlMethodEnd = source.indexOf("handleMergeKeyDown", ctrlMethodStart);

@@ -3,11 +3,12 @@ import { createHash } from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
+import { readPluginSource } from "./plugin-source.mjs";
 
 const testDir = path.dirname(fileURLToPath(import.meta.url));
 const projectDir = path.resolve(testDir, "..");
 const css = fs.readFileSync(path.join(projectDir, "styles.css"), "utf8").replace(/\r\n?/gu, "\n");
-const main = fs.readFileSync(path.join(projectDir, "main.ts"), "utf8");
+const main = readPluginSource();
 
 const visualBaselineSha256 = "590752dba16a0b7b5c3f4677ccd013a6433a8920016e9a7c5e8678ffc991013b";
 assert.equal(

@@ -1,0 +1,40 @@
+import { execFileSync } from 'node:child_process';
+import fs from 'node:fs/promises';
+import path from 'node:path';
+import { createHash, randomUUID } from 'node:crypto';
+import { fileURLToPath } from 'node:url';
+import paths from '../scripts/paths.cjs';
+
+const projectDir = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
+const vaultRoot = paths.requireVaultRoot();
+const cli = process.env.OBSIDIAN_CLI || (process.platform === 'win32' ? 'obsidian.com' : 'obsidian');
+const hash = bytes => createHash('sha256').update(bytes).digest('hex');
+const dataPath = path.join(vaultRoot, '.obsidian/plugins/local-ir/data.json');
+const before = hash(await fs.readFile(dataPath));
+const code = `(async () => {
+  const assert = require('node:assert/strict');
+  assert.equal(require('node:path').resolve(app.vault.adapter.getBasePath()), ${JSON.stringify(vaultRoot)});
+  const active = app.workspace.activeLeaf, file = app.workspace.getActiveFile();
+  const selection = document.getSelection();
+  const position = selection ? [selection.anchorNode, selection.anchorOffset, selection.focusNode, selection.focusOffset] : null;
+  const fs = require('node:fs');
+  const reading = await new Function('require','document','window','buildPath','projectPath', fs.readFileSync(${JSON.stringify(path.join(projectDir, 'canary/reading-view.cjs'))}, 'utf8'))(require, document, window, ${JSON.stringify(path.join(paths.buildDir, 'main.js'))}, ${JSON.stringify(projectDir)});
+  const palette = new Function('require','document',fs.readFileSync(${JSON.stringify(path.join(projectDir, 'canary/reading-colors.cjs'))}, 'utf8'))(require, document);
+  assert.equal(app.workspace.activeLeaf, active);
+  assert.equal(app.workspace.getActiveFile(), file);
+  const after = document.getSelection();
+  if (position) assert.deepEqual([after.anchorNode, after.anchorOffset, after.focusNode, after.focusOffset], position);
+  return JSON.stringify({status:'PASS', reading, palette, loadedVersion:app.plugins.plugins['local-ir']?.manifest.version, activeContextUnchanged:true});
+})()`;
+const stdout = execFileSync(cli, ['eval', `code=${code}`], { encoding: 'utf8', timeout: 60000, windowsHide: true });
+const result = JSON.parse(stdout.trim().replace(/^=>\s*/, ''));
+if (result.status !== 'PASS') throw new Error('Native canary did not pass.');
+const after = hash(await fs.readFile(dataPath));
+if (before !== after) throw new Error('Production data changed while the isolated canary ran. Inspect before accepting.');
+const manifest = JSON.parse(await fs.readFile(path.join(paths.buildDir, 'manifest.json'), 'utf8'));
+const receipt = { ...result, candidateVersion: manifest.version, dataUnchanged: true, dataSha256: after,
+  buildSha256: hash(await fs.readFile(path.join(paths.buildDir, 'main.js'))), at: new Date().toISOString() };
+const reportPath = path.join(paths.artifactRoot, 'canaries', `native-${randomUUID()}.json`);
+await fs.mkdir(path.dirname(reportPath), { recursive: true });
+await fs.writeFile(reportPath, JSON.stringify(receipt, null, 2) + '\n');
+console.log(JSON.stringify({ ...receipt, reportPath }, null, 2));

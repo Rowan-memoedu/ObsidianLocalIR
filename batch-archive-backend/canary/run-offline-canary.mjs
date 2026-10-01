@@ -1,14 +1,15 @@
 import { mkdir, readFile, rm, writeFile, rename } from "node:fs/promises";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
+import { randomUUID } from "node:crypto";
+import paths from "../../scripts/paths.cjs";
 import { normalizePackage, validateNormalizedPackage } from "../../../渐进阅读工作流/remnote-formal-archive/core.mjs";
 import { MODULE_VERSION, prepareExportPackage, validateExportPackage } from "../core.mjs";
 
 const here = path.dirname(fileURLToPath(import.meta.url));
 const moduleRoot = path.resolve(here, "..");
-const runRoot = path.join(here, "runs", `offline-v${MODULE_VERSION}`);
+const runRoot = path.join(paths.artifactRoot, "canaries", `offline-v${MODULE_VERSION}-${randomUUID()}`);
 const input = JSON.parse(await readFile(path.join(moduleRoot, "fixtures", "mixed-package.input.json"), "utf8"));
-await rm(runRoot, { recursive: true, force: true });
 
 const resolvePath = (portable) => path.join(runRoot, ...portable.split("/"));
 const io = {
@@ -53,7 +54,8 @@ const result = {
   producerValidationErrors: validateExportPackage(pkg),
   importerValidationErrors: validateNormalizedPackage(normalized),
   dispositionSummary: normalized.dispositionSummary,
-  packagePath: input.paths.packageJsonPath
+  packagePath: input.paths.packageJsonPath,
+  runRoot
 };
 await writeFile(path.join(runRoot, "canary-result.json"), `${JSON.stringify(result, null, 2)}\n`, "utf8");
 console.log(JSON.stringify(result, null, 2));

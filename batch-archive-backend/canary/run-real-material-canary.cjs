@@ -2,21 +2,21 @@ const crypto = require("node:crypto");
 const fs = require("node:fs");
 const fsp = require("node:fs/promises");
 const Module = require("node:module");
-const os = require("node:os");
 const path = require("node:path");
 const { pathToFileURL } = require("node:url");
 
 const MODULE_VERSION = "1.4.0";
-const PLUGIN_VERSION = "0.8.5";
-const RUN_ID = process.env.LOCAL_IR_CANARY_RUN_ID || `real-material-v${MODULE_VERSION}`;
+const { artifactRoot, buildDir, requireVaultRoot } = require("../../scripts/paths.cjs");
+const PLUGIN_VERSION = require("../../manifest.json").version;
+const RUN_ID = process.env.LOCAL_IR_CANARY_RUN_ID || `real-material-v${MODULE_VERSION}-${Date.now()}`;
 const projectRoot = path.resolve(__dirname, "..", "..");
-const workspaceRoot = path.resolve(projectRoot, "..", "..");
+const workspaceRoot = requireVaultRoot();
 const installedPluginRoot = path.join(workspaceRoot, ".obsidian", "plugins", "local-ir");
 const dataPath = path.join(installedPluginRoot, "data.json");
-const pluginMainPath = path.join(projectRoot, "main.js");
-const localAppData = process.env.LOCALAPPDATA || path.join(os.homedir(), "AppData", "Local");
-const runRoot = path.join(localAppData, "LocalIRCanary", "batch-archive-backend", RUN_ID);
-const publicReceiptPath = path.join(__dirname, "runs", RUN_ID, "receipt.json");
+const pluginMainPath = path.join(buildDir, "main.js");
+const localAppData = artifactRoot;
+const runRoot = path.join(artifactRoot, "private-canaries", RUN_ID);
+const publicReceiptPath = path.join(artifactRoot, "canaries", RUN_ID, "receipt.json");
 
 main().catch((error) => {
   console.error(JSON.stringify({

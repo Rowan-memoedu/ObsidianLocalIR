@@ -1,13 +1,16 @@
 ﻿{
   "name": "local-incremental-reading",
-  "version": "0.8.9",
+  "version": "0.9.0",
   "description": "Local incremental reading queue for prepared Markdown files in Obsidian.",
   "main": "main.js",
   "scripts": {
     "build": "node esbuild.config.mjs production",
     "dev": "node esbuild.config.mjs",
-    "test": "node test/metric-presets.test.mjs && node test/priority-initialization-race.test.mjs && node test/priority-scheduling.test.mjs && node test/archive-text.test.mjs && node test/frontend-baseline.test.mjs && node test/link-import-interface.test.mjs && node test/editor-gestures.test.mjs && node test/document-state-defer.test.mjs && node --test batch-archive-backend/test/*.test.mjs",
+    "deploy": "node scripts/deploy.mjs",
+    "check": "tsc --noEmit",
+    "test": "node test/metric-presets.test.mjs && node test/priority-initialization-race.test.mjs && node test/priority-scheduling.test.mjs && node test/archive-text.test.mjs && node test/frontend-baseline.test.mjs && node test/link-import-interface.test.mjs && node test/editor-gestures.test.mjs && node test/document-state-defer.test.mjs && node --test test/state-safety.test.mjs test/deployment.test.mjs batch-archive-backend/test/*.test.mjs",
     "priority-init:canary": "node canary/run-priority-initialization-canary.mjs",
+    "native:canary": "node canary/run-native-canary.mjs",
     "batch-archive:test": "node --test batch-archive-backend/test/*.test.mjs",
     "batch-archive:canary": "node batch-archive-backend/canary/run-offline-canary.mjs",
     "batch-archive:canary:real": "node batch-archive-backend/canary/run-real-material-canary.cjs",

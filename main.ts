@@ -1,51 +1,133 @@
-import {
-  AbstractInputSuggest,
-  App,
-  Editor,
-  FuzzySuggestModal,
-  ItemView,
-  Menu,
-  Modal,
-  Notice,
-  Plugin,
-  PluginSettingTab,
-  Setting,
-  TFile,
-  TFolder,
-  WorkspaceLeaf,
-  editorInfoField,
-  normalizePath,
-  requestUrl
-} from "obsidian";
-import { Prec, RangeSetBuilder, StateEffect } from "@codemirror/state";
-import { Decoration, DecorationSet, EditorView, ViewPlugin, ViewUpdate } from "@codemirror/view";
-import { promises as fs } from "fs";
-import { mapReadingText, readingSelectionOffsets, readingDecorationRanges } from "./reading-highlights";
 import * as path from "path";
 import LocalIrDocumentCore from "../渐进阅读工作流/document-core/index.mjs";
-import { extractMarkdownHeadingsLinear, extractParagraphsLinear } from "./archive-text.mjs";
+import type {
+  AnnotationAnchor,
+  AnnotationFragment,
+  AnnotationMarkKind,
+  AnnotationRecord,
+  AnnotationSourceFormat,
+  ArchiveAnnotationPayload,
+  ArchiveArticleMusingPayload,
+  ArchiveClozeCardPayload,
+  ArchiveQaCardPayload,
+  ArticleMusingRecord,
+  BrowserImportRequestResponse,
+  DocRecord,
+  EditorSelection,
+  HierarchyContext,
+  HierarchyScope,
+  LegacyHighlight,
+  LinkImportBatchItem,
+  LinkImportBatchResponse,
+  LinkImportResult,
+  LocalIRSettings,
+  MarkRange,
+  MetricKey,
+  MetricValues,
+  NoRemnoteContentPreflight,
+  NormalizedHighlightSelection,
+  PendingImportRecord,
+  QaCardRecord,
+  ReadingStatus,
+  RecentHighlightAction,
+  RecentVirtualHighlightRedoAction,
+  TextRange
+} from "./types";
+import {
+  ANNOTATION_LABELS,
+  DEFAULT_ARCHIVE_FOLDER,
+  DEFAULT_COMPLETED_SOURCE_FOLDER,
+  DEFAULT_DOCUMENT_STATE_FOLDER,
+  DEFAULT_FOLDER,
+  DEFAULT_LINK_IMPORT_FOLDER,
+  DEFAULT_METRICS,
+  DEFAULT_QUESTION_QUEUE_FOLDER,
+  DEFAULT_REFINED_READING_FOLDER,
+  DEFAULT_REMOVED_READING_FOLDER,
+  DEFAULT_SETTINGS,
+  DEFAULT_SOURCE_ARCHIVE_FOLDER,
+  DEFAULT_WEIGHTS,
+  DOCUMENT_STATE_SUFFIX,
+  LOCAL_IR_SERVICE_PORT_END,
+  LOCAL_IR_SERVICE_PORT_START,
+  METRIC_LABELS,
+  PLUGIN_DATA_VERSION,
+  VIEW_TYPE_LOCAL_IR,
+  addDaysKey,
+  blockquote,
+  calculatePriorityWithWeights,
+  captureAnnotationSnapshot,
+  clamp,
+  clampRangeIndex,
+  cloneAnnotation,
+  createAnnotationAnchor,
+  createAnnotationId,
+  createMusingId,
+  createQaCardId,
+  createSelectionHierarchy,
+  createWrappedHighlightText,
+  detectProtectedKindForSelection,
+  escapeYaml,
+  extractExternalUrls,
+  findAllMarkRanges,
+  findLastIndex,
+  findMarkedTextRange,
+  findSearchOffset,
+  getAnnotationRoute,
+  getAnnotationVirtualRanges,
+  getLineRangeForOffsets,
+  getNormalizedSelection,
+  getRemNoteTargetDocument,
+  hasAnnotationWork,
+  hasMarkId,
+  isDangerousMarkedRange,
+  isDateOnDay,
+  normalizeAnnotation,
+  normalizeAnnotationType,
+  normalizeArchiveFailureState,
+  normalizeArticleMusing,
+  normalizeExternalUrl,
+  normalizeMarkKind,
+  normalizeMetrics,
+  normalizePendingImportUrl,
+  normalizePendingImports,
+  normalizeQaCard,
+  normalizeReadingFolders,
+  normalizeRecord,
+  normalizeStatus,
+  normalizeTextRanges,
+  rangesOverlap,
+  renderClozeMarkdown,
+  renderRemNoteMultiLineCard,
+  replaceMarkedText,
+  resolveAnnotationHierarchy,
+  resolveBilingualMatch,
+  resolveQaQuestion,
+  resolveSelectionHierarchy,
+  roulette,
+  sameTextRanges,
+  sanitizeFileName,
+  scanLegacyHighlights,
+  shortHash,
+  shouldCreateQaCardFromAnnotation,
+  stripIrMarkup,
+  stripMarkedRangesAndTrack,
+  todayKey,
+  truncate,
+  uniqueNormalizedPaths
+} from "./model";
+import { AnnotationModal, NoRemnoteContentConfirmationModal, QaCardModal } from "./modals";
+import { CoalescedAsyncTask } from "./async-work";
 import {
   DEFAULT_METRIC_VALUE,
   MAX_METRIC_VALUE,
-  inferMetricsEditedByUser,
   isDefaultMetricInitialization,
-  metricLevelLabel,
   parseReadingMetricPreset,
   reconcileReadingMetricPreset,
   snapMetricValue
 } from "./metric-presets";
-import {
-  comparePriorityRecords,
-  findExtremePriorityRecord,
-  isExtremePriorityMetrics
-} from "./priority-scheduling";
-import {
-  getMarkdownBlockRangeAtOffset,
-  isPlainRedoShortcut,
-  isPlainUndoShortcut,
-  isUndoableVirtualHighlightAction,
-  isWholeBlockHighlightGesture
-} from "./editor-gestures";
+import { Editor, Menu, Notice, Plugin, TFile, TFolder, normalizePath, requestUrl } from "obsidian";
+import { EditorView, ViewUpdate } from "@codemirror/view";
 import {
   INPUT_SCHEMA as BATCH_ARCHIVE_INPUT_SCHEMA,
   PACKAGE_STATUS as EXPORT_PACKAGE_READY,
@@ -58,572 +140,28 @@ import {
   prepareExportPackage,
   runBatchArchive
 } from "./batch-archive-backend/core.mjs";
-
-const VIEW_TYPE_LOCAL_IR = "local-incremental-reading-view";
-const localIrRefreshEffect = StateEffect.define<void>();
+import { LocalIRSettingTab } from "./settings";
+import { LocalIRView } from "./sidebar";
+import { comparePriorityRecords, findExtremePriorityRecord } from "./priority-scheduling";
+import {
+  createVirtualHighlightExtension,
+  getCodeMirrorView,
+  getEditorViewPath,
+  localIrRefreshEffect
+} from "./editor-integration";
+import { documentStateFileName, indexByDocument } from "./document-state";
+import {
+  getMarkdownBlockRangeAtOffset,
+  isPlainRedoShortcut,
+  isPlainUndoShortcut,
+  isUndoableVirtualHighlightAction
+} from "./editor-gestures";
+import { mapReadingText, readingDecorationRanges, readingSelectionOffsets } from "./reading-highlights";
+import { promises as fs } from "fs";
 
 if (!LocalIrDocumentCore?.normalizeDocumentState) {
   throw new Error("Local IR document core is unavailable.");
 }
-
-type ReadingStatus = "inbox" | "reading" | "later" | "suspended" | "done" | "export_package_ready" | "archived";
-type MetricKey = "importance" | "urgency" | "difficulty" | "interest";
-type AnnotationType =
-  | "highlight"
-  | "comment"
-  | "myth_truth"
-  | "rebuttal"
-  | "sample_quote"
-  | "later"
-  | "rewrite"
-  | "refine"
-  | "add_viewpoint"
-  | "rebuttal_rewrite"
-  | "question"
-  | "optimize"
-  | "example_viewpoint"
-  | "qa_card";
-type AnnotationSourceFormat = "mark" | "legacy" | "virtual";
-type AnnotationRenderMode = "inline_mark" | "virtual_decoration";
-type ProtectedKind = "html_block" | "style_block" | "code_fence" | "math_block" | "link" | "image" | "mixed";
-type AnnotationMarkKind = "highlight" | "cloze";
-type AnnotationRoute = "remnote" | "remnote_card" | "codex_question_queue" | "refined_reading";
-type BilingualConfidence = "high" | "medium" | "low" | "none";
-type HierarchyScope = "selection" | "heading_subtree" | "list_subtree";
-type QaCardSource = "article" | "annotation";
-type ArticleMusingAiStatus = "pending" | "resolved" | "skipped";
-type PendingImportStatus = "pending" | "importing" | "failed";
-
-interface TextRange {
-  start: number;
-  end: number;
-}
-
-interface LineRange {
-  startLine: number;
-  endLine: number;
-}
-
-interface ProtectedRange extends TextRange {
-  kind: ProtectedKind;
-}
-
-interface NormalizedHighlightSelection {
-  id: string;
-  selectedText: string;
-  fromOffset: number;
-  toOffset: number;
-  from: { line: number; ch: number };
-  to: { line: number; ch: number };
-  renderMode: AnnotationRenderMode;
-  sourceFormat: AnnotationSourceFormat;
-  protectedKind: ProtectedKind | null;
-  virtualRanges: TextRange[];
-  overlappingIds: string[];
-  beforeAnnotations: Record<string, AnnotationRecord | null>;
-}
-
-interface MarkdownLine {
-  index: number;
-  text: string;
-  start: number;
-  end: number;
-  breakEnd: number;
-}
-
-interface HierarchyContext {
-  scope: HierarchyScope;
-  headingPath: string[];
-  expandedText: string;
-  expandedAnswerText: string;
-  subtreeRange: TextRange | null;
-}
-
-interface AnnotationFragment {
-  index: number;
-  text: string;
-}
-
-interface AnnotationAnchor {
-  sectionPath: string[];
-  paragraphIndex: number | null;
-  sourceOffset: number | null;
-  contextBefore: string;
-  contextAfter: string;
-  contextHash: string;
-  fragmentCount: number;
-  crossedBlankLines: boolean;
-}
-
-interface BilingualCandidate {
-  index: number;
-  text: string;
-  score: number;
-}
-
-interface BilingualMatch {
-  detected: boolean;
-  strategy: string;
-  confidence: BilingualConfidence;
-  chineseText: string;
-  englishText: string;
-  chineseParagraphIndex: number | null;
-  englishParagraphIndex: number | null;
-  candidates: BilingualCandidate[];
-  warning: string | null;
-  needsApiResolution: boolean;
-}
-
-interface EditorSelection {
-  from: { line: number; ch: number };
-  to: { line: number; ch: number };
-  fromOffset: number;
-  toOffset: number;
-  text: string;
-}
-
-interface TextParagraph {
-  index: number;
-  text: string;
-  start: number;
-  end: number;
-}
-
-interface BilingualSections {
-  zh: { title: string; text: string; start: number; end: number } | null;
-  en: { title: string; text: string; start: number; end: number } | null;
-}
-
-interface MetricValues {
-  importance: number;
-  urgency: number;
-  difficulty: number;
-  interest: number;
-}
-
-interface MetricWeights {
-  importance: number;
-  urgency: number;
-  difficulty: number;
-  interest: number;
-}
-
-interface DocRecord {
-  path: string;
-  title: string;
-  status: ReadingStatus;
-  metrics: MetricValues;
-  metricsEditedByUser: boolean;
-  metricPresetCheckedMtime: number | null;
-  priority: number;
-  visitCount: number;
-  lastVisited: string | null;
-  deferUntil: string | null;
-  archivedAt: string | null;
-  archiveExportPath: string | null;
-  archivePackagePath: string | null;
-  archivePackageId: string | null;
-  archivePackageRevision: number | null;
-  archiveInputHash: string | null;
-  exportPackageReadyAt: string | null;
-  archiveAttemptCount: number;
-  archiveLastError: string | null;
-  archiveLastFailure: ArchiveFailureState | null;
-  originalSourcePath: string | null;
-  archivedSourcePath: string | null;
-  movedIntoReadingPoolFromPath: string | null;
-  movedIntoReadingPoolAt: string | null;
-  removedFromReadingPoolAt: string | null;
-  removedToPath: string | null;
-  readingPathBeforeCompletion: string | null;
-  completedSourcePath: string | null;
-  completedAt: string | null;
-  documentStateSidecarPath?: string | null;
-  documentStateRevision?: number | null;
-  documentStateUpdatedAt?: string | null;
-  documentStateFingerprint?: string | null;
-}
-
-interface ArchiveFailureState {
-  code: string;
-  kind: "blocked" | "failed";
-  reasonCode: string | null;
-  message: string;
-  details: { errors: string[] };
-  retryable: boolean;
-  occurredAt: string | null;
-}
-
-interface NoRemnoteContentPreflight {
-  path: string;
-  title: string;
-  missingElementKinds: string[];
-}
-
-interface AnnotationRecord {
-  id: string;
-  path: string;
-  selectedText: string;
-  sourceFormat: AnnotationSourceFormat;
-  renderMode: AnnotationRenderMode;
-  protectedKind: ProtectedKind | null;
-  markKind: AnnotationMarkKind;
-  originalText: string;
-  currentText: string;
-  type: AnnotationType;
-  commentMarkdown: string;
-  rewriteMarkdown: string;
-  hasRewrite: boolean;
-  rewriteApplied: boolean;
-  orphaned: boolean;
-  lastKnownPath: string;
-  sourceOffset: number | null;
-  range: TextRange | null;
-  virtualRanges: TextRange[];
-  lineRange: LineRange | null;
-  anchor: AnnotationAnchor | null;
-  fragments: AnnotationFragment[];
-  scope: HierarchyScope;
-  headingPath: string[];
-  expandedText: string;
-  expandedAnswerText: string;
-  subtreeRange: TextRange | null;
-  createdAt: string;
-  updatedAt: string;
-  archived: boolean;
-}
-
-interface QaCardRecord {
-  id: string;
-  path: string;
-  source: QaCardSource;
-  sourceAnnotationId: string | null;
-  questionMarkdown: string;
-  answerMarkdown: string;
-  answerSourceText: string;
-  needsQuestionGeneration: boolean;
-  needsAnswerGeneration: boolean;
-  createdAt: string;
-  updatedAt: string;
-  archived: boolean;
-}
-
-interface ArticleMusingRecord {
-  id: string;
-  path: string;
-  bodyMarkdown: string;
-  aiStatus: ArticleMusingAiStatus;
-  createdAt: string;
-  updatedAt: string;
-  archived: boolean;
-}
-
-interface PendingImportRecord {
-  id: string;
-  url: string;
-  normalizedUrl: string;
-  sourcePath: string | null;
-  status: PendingImportStatus;
-  addedAt: string;
-  updatedAt: string;
-  lastAttemptAt: string | null;
-  attemptCount: number;
-  lastError: string | null;
-  brokerClientRequestId: string | null;
-}
-
-interface LinkImportResult {
-  ok: boolean;
-  error: string | null;
-}
-
-interface LinkImportBatchItem {
-  requested_url: string;
-  final_url?: string;
-  status: "imported" | "imported_with_warnings" | "idempotent_replay" | "failed" | "requires_browser_auth" | "requires_js_render";
-  receipt?: { quality_status?: "ready" | "warning" | "failed"; readable_with_warnings?: boolean; warning_codes?: string[] };
-  error?: string;
-  errors?: Array<{ code?: string; message?: string }>;
-}
-
-interface LinkImportBatchResponse {
-  status: "completed" | "completed_with_warnings" | "completed_with_failures" | "completed_with_degradations" | "requires_browser_auth" | "requires_js_render" | "degraded" | "failed";
-  requested: number;
-  imported: number;
-  failed: number;
-  degraded?: number;
-  warnings?: number;
-  concurrency: number;
-  results: LinkImportBatchItem[];
-}
-
-interface BrowserImportRequestResponse extends LinkImportBatchResponse {
-  request_id: string;
-  client_request_id?: string | null;
-  terminal: boolean;
-  active: number;
-  queued: number;
-}
-
-interface ArchiveAnnotationPayload {
-  index: number;
-  id: string;
-  type: AnnotationType;
-  typeLabel: string;
-  route: AnnotationRoute;
-  targetDocument: string | null;
-  importable: boolean;
-  highlightOnly: boolean;
-  sourceFormat: AnnotationSourceFormat;
-  renderMode: AnnotationRenderMode;
-  protectedKind: ProtectedKind | null;
-  markKind: AnnotationMarkKind;
-  orphaned: boolean;
-  rewriteApplied: boolean;
-  originalText: string;
-  currentText: string;
-  commentMarkdown: string;
-  rewriteMarkdown: string;
-  createdAt: string;
-  updatedAt: string;
-  archived: boolean;
-  anchor: AnnotationAnchor | null;
-  range: TextRange | null;
-  lineRange: LineRange | null;
-  fragments: AnnotationFragment[];
-  scope: HierarchyScope;
-  headingPath: string[];
-  expandedText: string;
-  expandedAnswerText: string;
-  subtreeRange: TextRange | null;
-  bilingual: BilingualMatch;
-}
-
-interface ArchiveClozeCardPayload {
-  index: number;
-  id: string;
-  sourceAnnotationId: string;
-  status: "pending" | "imported" | "failed";
-  sourcePath: string;
-  sourceTitle: string;
-  scope: HierarchyScope;
-  headingPath: string[];
-  contextText: string;
-  answerText: string;
-  clozeMarkdown: string;
-  createdAt: string;
-  updatedAt: string;
-  archived: boolean;
-}
-
-interface ArchiveQaCardPayload {
-  index: number;
-  id: string;
-  source: QaCardSource;
-  sourceAnnotationId: string | null;
-  status: "pending" | "imported" | "failed";
-  questionMarkdown: string;
-  answerMarkdown: string;
-  answerSourceText: string;
-  needsQuestionGeneration: boolean;
-  needsAnswerGeneration: boolean;
-  headingPath: string[];
-  scope: HierarchyScope;
-  sourcePath: string;
-  sourceTitle: string;
-  createdAt: string;
-  updatedAt: string;
-  archived: boolean;
-  cardMarkdown: string;
-}
-
-interface ArchiveArticleMusingPayload {
-  index: number;
-  id: string;
-  path: string;
-  bodyMarkdown: string;
-  aiStatus: ArticleMusingAiStatus;
-  createdAt: string;
-  updatedAt: string;
-  archived: boolean;
-}
-
-interface LocalIRSettings {
-  settingsVersion: number;
-  readingFolder: string;
-  readingFolders: string[];
-  excludeVisitedToday: boolean;
-  absolutePriorityProbability: number;
-  defaultDeferDays: number;
-  archiveFolder: string;
-  sourceArchiveFolder: string;
-  completedSourceFolder: string;
-  removedReadingFolder: string;
-  refinedReadingFolder: string;
-  questionQueueFolder: string;
-  linkImportFolder: string;
-  documentStateFolder: string;
-  processingModeEnabled: boolean;
-  clozeModeEnabled: boolean;
-  autoMergeHighlightsEnabled: boolean;
-  alwaysVirtualHighlightsEnabled: boolean;
-  autoOpenAnnotationModal: boolean;
-  metricWeights: MetricWeights;
-  records: Record<string, DocRecord>;
-  annotations: Record<string, AnnotationRecord>;
-  qaCards: Record<string, QaCardRecord>;
-  articleMusings: Record<string, ArticleMusingRecord>;
-  pendingImports: PendingImportRecord[];
-}
-
-type RecentHighlightAction = RecentHighlightCreateAction | RecentHighlightMergeAction;
-
-interface RecentHighlightCreateAction {
-  kind: "highlight";
-  id: string;
-  path: string;
-  selectedText: string;
-  wrappedText: string;
-}
-
-interface RecentHighlightMergeAction {
-  change?: any;
-  kind: "merge";
-  path: string;
-  beforeContent: string;
-  afterContent: string;
-  beforeAnnotations: Record<string, AnnotationRecord | null>;
-  mergedIds: string[];
-}
-
-interface RecentVirtualHighlightRedoAction extends RecentHighlightMergeAction {
-  afterAnnotations: Record<string, AnnotationRecord | null>;
-}
-
-interface LegacyHighlight {
-  id: string;
-  path: string;
-  text: string;
-  startOffset: number;
-  endOffset: number;
-}
-
-const DEFAULT_FOLDER = "00 Inbox/IR 工作台/00 原文队列";
-const DEFAULT_ARCHIVE_FOLDER = "04 Projects/渐进阅读工作流/RemNote 导出队列";
-const DEFAULT_SOURCE_ARCHIVE_FOLDER = "04 Projects/渐进阅读工作流/已归档原文";
-const DEFAULT_COMPLETED_SOURCE_FOLDER = "04 Projects/渐进阅读工作流/待归档原文";
-const DEFAULT_REMOVED_READING_FOLDER = "04 Projects/渐进阅读工作流/移出阅读池";
-const DEFAULT_REFINED_READING_FOLDER = "04 Projects/渐进阅读工作流/阅读区/二次阅读";
-const DEFAULT_QUESTION_QUEUE_FOLDER = "04 Projects/渐进阅读工作流/Codex 提问队列";
-const DEFAULT_LINK_IMPORT_FOLDER = "04 Projects/渐进阅读工作流/阅读区/微信";
-const DEFAULT_DOCUMENT_STATE_FOLDER = "04 Projects/渐进阅读工作流/.local-ir/browser-document-state";
-const DOCUMENT_STATE_SUFFIX = ".browser-ir.json";
-const LOCAL_IR_SERVICE_PORT_START = 37829;
-const LOCAL_IR_SERVICE_PORT_END = 37849;
-
-const DEFAULT_METRICS: MetricValues = {
-  importance: DEFAULT_METRIC_VALUE,
-  urgency: DEFAULT_METRIC_VALUE,
-  difficulty: DEFAULT_METRIC_VALUE,
-  interest: DEFAULT_METRIC_VALUE
-};
-
-const DEFAULT_WEIGHTS: MetricWeights = {
-  importance: 40,
-  urgency: 20,
-  difficulty: 15,
-  interest: 25
-};
-
-const METRIC_LABELS: Record<MetricKey, string> = {
-  importance: "价值判断",
-  urgency: "信息密度判断",
-  difficulty: "难度",
-  interest: "兴趣"
-};
-
-const STATUS_LABELS: Record<ReadingStatus, string> = {
-  inbox: "待读",
-  reading: "阅读中",
-  later: "Later",
-  suspended: "搁置",
-  done: "待批量生成导出包",
-  export_package_ready: "导出包已准备（尚未正式归档）",
-  archived: "正式归档成功"
-};
-
-const ARCHIVE_ELEMENT_LABELS: Record<string, string> = {
-  annotations: "批注",
-  cards: "QA",
-  clozeCards: "挖空",
-  articleMusings: "随想"
-};
-
-const ANNOTATION_LABELS: Record<AnnotationType, string> = {
-  highlight: "仅高亮",
-  comment: "普通评论",
-  myth_truth: "迷思 / 真相",
-  rebuttal: "反驳",
-  sample_quote: "引用",
-  later: "稍后处理",
-  rewrite: "改写",
-  refine: "精炼",
-  add_viewpoint: "联想",
-  rebuttal_rewrite: "反驳后改写",
-  question: "提问",
-  optimize: "优化",
-  example_viewpoint: "例子与观点",
-  qa_card: "问答卡"
-};
-
-const ANNOTATION_MODAL_TYPES: AnnotationType[] = ["comment", "myth_truth", "sample_quote", "add_viewpoint", "question", "optimize", "example_viewpoint", "qa_card"];
-
-const VALID_STATUSES = new Set<ReadingStatus>(["inbox", "reading", "later", "suspended", "done", "export_package_ready", "archived"]);
-const VALID_ANNOTATION_TYPES = new Set<AnnotationType>([
-  "highlight",
-  "comment",
-  "myth_truth",
-  "rebuttal",
-  "sample_quote",
-  "later",
-  "rewrite",
-  "refine",
-  "add_viewpoint",
-  "rebuttal_rewrite",
-  "question",
-  "optimize",
-  "example_viewpoint",
-  "qa_card"
-]);
-const PLUGIN_DATA_VERSION = 14;
-
-const DEFAULT_SETTINGS: LocalIRSettings = {
-  settingsVersion: PLUGIN_DATA_VERSION,
-  readingFolder: DEFAULT_FOLDER,
-  readingFolders: [DEFAULT_FOLDER],
-  excludeVisitedToday: true,
-  absolutePriorityProbability: 0.2,
-  defaultDeferDays: 7,
-  archiveFolder: DEFAULT_ARCHIVE_FOLDER,
-  sourceArchiveFolder: DEFAULT_SOURCE_ARCHIVE_FOLDER,
-  completedSourceFolder: DEFAULT_COMPLETED_SOURCE_FOLDER,
-  removedReadingFolder: DEFAULT_REMOVED_READING_FOLDER,
-  refinedReadingFolder: DEFAULT_REFINED_READING_FOLDER,
-  questionQueueFolder: DEFAULT_QUESTION_QUEUE_FOLDER,
-  linkImportFolder: DEFAULT_LINK_IMPORT_FOLDER,
-  documentStateFolder: DEFAULT_DOCUMENT_STATE_FOLDER,
-  processingModeEnabled: false,
-  clozeModeEnabled: false,
-  autoMergeHighlightsEnabled: false,
-  alwaysVirtualHighlightsEnabled: true,
-  autoOpenAnnotationModal: false,
-  metricWeights: DEFAULT_WEIGHTS,
-  records: {},
-  annotations: {},
-  qaCards: {},
-  articleMusings: {},
-  pendingImports: []
-};
 
 export default class LocalIncrementalReadingPlugin extends Plugin {
   settings: LocalIRSettings;
@@ -635,7 +173,12 @@ export default class LocalIncrementalReadingPlugin extends Plugin {
   manualMergeIds: string[] = [];
   virtualRangeSaveTimer: number | undefined;
   pendingImportResumeTimer: number | undefined;
-  sidecarFlushInProgress = false;
+  private pendingSidecarPaths = new Set<string>();
+  private dataSaveTask = new CoalescedAsyncTask(async () => { await this.saveData(this.settings); });
+  private sidecarFlushTask = new CoalescedAsyncTask(() => this.flushPendingDocumentStateSidecars());
+  private sidecarScanSignatures = new Map<string, string>();
+  private managedRenamePaths = new Set<string>();
+  private viewRefreshTask = new CoalescedAsyncTask(() => this.renderViews());
   batchArchiveInProgress = false;
   singleArchivePathsInProgress = new Set<string>();
   localIrServicePort: number | null = null;
@@ -710,6 +253,10 @@ export default class LocalIncrementalReadingPlugin extends Plugin {
       this.addUrlImportMenuItems(menu, url);
     }));
     this.register(() => window.clearTimeout(this.virtualRangeSaveTimer));
+    this.register(() => {
+      for (const timer of Object.values(this.reconcileTimers)) window.clearTimeout(timer);
+      this.reconcileTimers = {};
+    });
 
     this.registerEvent(this.app.vault.on("rename", (file, oldPath) => {
       void this.handleVaultRename(file, oldPath);
@@ -806,17 +353,21 @@ export default class LocalIncrementalReadingPlugin extends Plugin {
     };
   }
 
-  async saveSettings(options?: { flushDocumentStateSidecars?: boolean }) {
-    await this.saveData(this.settings);
+  async saveSettings(options?: { flushDocumentStateSidecars?: boolean; documentPaths?: string[] }) {
+    await this.dataSaveTask.request();
     if (options?.flushDocumentStateSidecars !== false) {
-      await this.flushDocumentStateSidecars();
+      await this.flushDocumentStateSidecars(options?.documentPaths);
     }
   }
 
   getDocumentStateSidecarPath(markdownPath: string): string {
-    const fileName = normalizePath(markdownPath).split("/").pop() || `document-${shortHash(markdownPath)}.md`;
     const folder = normalizePath(this.settings.documentStateFolder || DEFAULT_DOCUMENT_STATE_FOLDER);
-    return normalizePath(`${folder}/${fileName}${DOCUMENT_STATE_SUFFIX}`);
+    return normalizePath(`${folder}/${documentStateFileName(normalizePath(markdownPath))}`);
+  }
+
+  getFlatDocumentStateSidecarPath(markdownPath: string): string {
+    const folder = normalizePath(this.settings.documentStateFolder || DEFAULT_DOCUMENT_STATE_FOLDER);
+    return normalizePath(`${folder}/${normalizePath(markdownPath).split("/").pop()}${DOCUMENT_STATE_SUFFIX}`);
   }
 
   getLegacyDocumentStateSidecarPath(markdownPath: string): string {
@@ -824,10 +375,21 @@ export default class LocalIncrementalReadingPlugin extends Plugin {
   }
 
   async resolveDocumentStateSidecarPath(markdownPath: string): Promise<string | null> {
-    const preferred = this.getDocumentStateSidecarPath(markdownPath);
-    if (await this.app.vault.adapter.exists(preferred)) return preferred;
-    const legacy = this.getLegacyDocumentStateSidecarPath(markdownPath);
-    if (await this.app.vault.adapter.exists(legacy)) return legacy;
+    const candidates = new Set([
+      this.settings.records[markdownPath]?.documentStateSidecarPath,
+      this.getDocumentStateSidecarPath(markdownPath),
+      this.getFlatDocumentStateSidecarPath(markdownPath),
+      this.getLegacyDocumentStateSidecarPath(markdownPath)
+    ].filter(Boolean) as string[]);
+    for (const candidate of candidates) {
+      if (!(await this.app.vault.adapter.exists(candidate))) continue;
+      try {
+        await this.readDocumentStateSidecarAtPath(candidate, markdownPath);
+        return candidate;
+      } catch (error) {
+        console.warn(`Local IR: ignoring an invalid or mismatched sidecar: ${candidate}`);
+      }
+    }
     return null;
   }
 
@@ -838,6 +400,9 @@ export default class LocalIncrementalReadingPlugin extends Plugin {
     if (!supported) throw new Error("Unsupported Local IR document state schema.");
     const documentPath = normalizePath(parsed?.document?.path || fallbackMarkdownPath);
     if (!documentPath) throw new Error("Local IR document state is missing document.path.");
+    if (fallbackMarkdownPath && documentPath !== normalizePath(fallbackMarkdownPath)) {
+      throw new Error("Local IR document state belongs to another document.");
+    }
     return {
       state: LocalIrDocumentCore.normalizeDocumentState(parsed, { path: documentPath }),
       sidecarPath: normalizePath(sidecarPath)
@@ -882,8 +447,15 @@ export default class LocalIncrementalReadingPlugin extends Plugin {
   }
 
   async importDocumentStateSidecar(file: TFile, explicitSidecarPath = ""): Promise<boolean> {
+    const sidecarPath = explicitSidecarPath || await this.resolveDocumentStateSidecarPath(file.path);
+    if (!sidecarPath) return false;
+    const stat = await this.app.vault.adapter.stat?.(sidecarPath);
+    const signature = stat ? `${sidecarPath}:${stat.mtime}:${stat.size}:${file.stat.mtime}` : null;
+    if (signature && this.sidecarScanSignatures.get(file.path) === signature) return false;
     const markdown = await this.app.vault.cachedRead(file);
-    return this.importDocumentStateSidecarPath(file.path, explicitSidecarPath, markdown);
+    const changed = await this.importDocumentStateSidecarPath(file.path, sidecarPath, markdown);
+    if (signature) this.sidecarScanSignatures.set(file.path, signature);
+    return changed;
   }
 
   async importDocumentStateSidecarPath(markdownPathValue: string, explicitSidecarPath = "", providedMarkdown = ""): Promise<boolean> {
@@ -912,6 +484,10 @@ export default class LocalIncrementalReadingPlugin extends Plugin {
 
     const record = this.settings.records[markdownPath];
     if (!record) return false;
+    // Only the downstream archive transition may advance a frozen input.
+    // An older/external editing sidecar must not reopen a committed package.
+    if (this.isRecordFrozenForExport(markdownPath) &&
+        (record.status === "archived" || state.document.status !== "archived")) return false;
     const fingerprint = LocalIrDocumentCore.comparableDocumentState(state);
     if (
       record.documentStateRevision === state.document.revision &&
@@ -978,13 +554,24 @@ export default class LocalIncrementalReadingPlugin extends Plugin {
     }
   }
 
-  async flushDocumentStateSidecars() {
-    if (this.sidecarFlushInProgress) return;
-    this.sidecarFlushInProgress = true;
+  async flushDocumentStateSidecars(paths?: string[]) {
+    for (const documentPath of paths || Object.keys(this.settings.records)) {
+      if (this.settings.records[documentPath]?.documentStateSidecarPath) this.pendingSidecarPaths.add(documentPath);
+    }
+    if (this.pendingSidecarPaths.size === 0) return;
+    await this.sidecarFlushTask.request();
+  }
+
+  private async flushPendingDocumentStateSidecars() {
+    const paths = [...this.pendingSidecarPaths];
+    this.pendingSidecarPaths.clear();
+    const annotations = indexByDocument(this.settings.annotations);
+    const qaCards = indexByDocument(this.settings.qaCards);
     let cacheChanged = false;
     try {
-      for (const record of Object.values(this.settings.records)) {
-        if (!record.documentStateSidecarPath) continue;
+      for (const documentPath of paths) {
+        const record = this.settings.records[documentPath];
+        if (!record?.documentStateSidecarPath) continue;
         let loaded: { state: any; sidecarPath: string } | null;
         try {
           loaded = await this.readDocumentStateSidecar(record.path);
@@ -1001,8 +588,8 @@ export default class LocalIncrementalReadingPlugin extends Plugin {
           title: record.title,
           status: record.status,
           deferUntil: record.deferUntil,
-          annotations: this.getAnnotationsForPath(record.path),
-          qaCards: this.getQaCardsForPath(record.path),
+          annotations: annotations.get(record.path) || [],
+          qaCards: qaCards.get(record.path) || [],
           articleMusing: this.getArticleMusing(record.path)
         });
         if (LocalIrDocumentCore.comparableDocumentState(current) === LocalIrDocumentCore.comparableDocumentState(next)) {
@@ -1015,9 +602,10 @@ export default class LocalIncrementalReadingPlugin extends Plugin {
         record.documentStateFingerprint = LocalIrDocumentCore.comparableDocumentState(next);
         cacheChanged = true;
       }
-      if (cacheChanged) await this.saveData(this.settings);
-    } finally {
-      this.sidecarFlushInProgress = false;
+      if (cacheChanged) await this.dataSaveTask.request();
+    } catch (error) {
+      for (const documentPath of paths) this.pendingSidecarPaths.add(documentPath);
+      throw error;
     }
   }
 
@@ -1173,6 +761,10 @@ export default class LocalIncrementalReadingPlugin extends Plugin {
   }
 
   async moveFileToReadingPool(file: TFile, silent: boolean): Promise<TFile | null> {
+    if (this.isRecordFrozenForExport(file.path)) {
+      new Notice("导出包已冻结，不能移动或重新开启加工。");
+      return null;
+    }
     const folder = this.getPrimaryReadingFolder();
     if (!folder || folder === "/") {
       new Notice("请先设置一个具体的阅读池文件夹。");
@@ -1193,7 +785,7 @@ export default class LocalIncrementalReadingPlugin extends Plugin {
     const oldPath = file.path;
     const targetPath = this.getUniquePathInFolder(folder, file);
     const existingRecord = this.settings.records[oldPath] || null;
-    await this.app.fileManager.renameFile(file, targetPath);
+    await this.renameManagedFile(file, targetPath);
     const moved = this.app.vault.getAbstractFileByPath(targetPath);
 
     if (moved instanceof TFile) {
@@ -1367,7 +959,7 @@ export default class LocalIncrementalReadingPlugin extends Plugin {
     }
   }
 
-  async handleVaultRename(file: unknown, oldPath: string) {
+  async handleVaultRename(file: unknown, oldPath: string, managed = false) {
     if (!(file instanceof TFile)) return;
     if (file.path.endsWith(DOCUMENT_STATE_SUFFIX)) {
       await this.handleDocumentStateSidecarArrival(file.path);
@@ -1376,6 +968,7 @@ export default class LocalIncrementalReadingPlugin extends Plugin {
     if (file.extension.toLowerCase() !== "md") return;
     const normalizedOldPath = normalizePath(oldPath);
     const normalizedNewPath = normalizePath(file.path);
+    if (!managed && this.managedRenamePaths.has(normalizedOldPath)) return;
     if (normalizedOldPath === normalizedNewPath) return;
     const existingRecord = this.settings.records[normalizedOldPath];
     const hasLinkedData = Boolean(
@@ -1387,32 +980,51 @@ export default class LocalIncrementalReadingPlugin extends Plugin {
     );
     if (!hasLinkedData) return;
 
-    const oldSidecarPath = this.getDocumentStateSidecarPath(normalizedOldPath);
-    const newSidecarPath = this.getDocumentStateSidecarPath(normalizedNewPath);
-    let sidecarMoved = oldSidecarPath === newSidecarPath && await this.app.vault.adapter.exists(oldSidecarPath);
-    if (oldSidecarPath !== newSidecarPath && await this.app.vault.adapter.exists(oldSidecarPath)) {
-      if (await this.app.vault.adapter.exists(newSidecarPath)) {
-        console.error(`Local IR: sidecar rename conflict: ${newSidecarPath}`);
-      } else {
-        await this.app.vault.adapter.rename(oldSidecarPath, newSidecarPath);
-        sidecarMoved = true;
-      }
-    }
+    const loaded = await this.readDocumentStateSidecar(normalizedOldPath);
 
     if (existingRecord) {
       delete this.settings.records[normalizedOldPath];
-      this.settings.records[normalizedNewPath] = normalizeRecord(normalizedNewPath, {
+      // Preserve object identity for operations awaiting the managed move.
+      Object.assign(existingRecord, normalizeRecord(normalizedNewPath, {
         ...existingRecord,
         path: normalizedNewPath,
         title: this.getTitle(file)
-      }, this.settings.metricWeights);
-      if (existingRecord.documentStateSidecarPath) {
-        this.settings.records[normalizedNewPath].documentStateSidecarPath = sidecarMoved ? newSidecarPath : null;
-      }
+      }, this.settings.metricWeights));
+      this.settings.records[normalizedNewPath] = existingRecord;
     }
     this.updateLinkedPaths(normalizedOldPath, normalizedNewPath);
-    await this.saveSettings();
-    await this.refreshViews();
+    if (loaded && existingRecord) {
+      // Keep the verified state-file identity, including legacy flat sidecars.
+      const next = LocalIrDocumentCore.replaceDocumentCollections(loaded.state, {
+        path: normalizedNewPath, title: existingRecord.title,
+        status: existingRecord.status, deferUntil: existingRecord.deferUntil,
+        annotations: this.getAnnotationsForPath(normalizedNewPath),
+        qaCards: this.getQaCardsForPath(normalizedNewPath),
+        articleMusing: this.getArticleMusing(normalizedNewPath)
+      });
+      await this.writeDocumentStateSidecarAtomic(loaded.sidecarPath, `${JSON.stringify(next, null, 2)}\n`);
+      existingRecord.documentStateSidecarPath = loaded.sidecarPath;
+      existingRecord.documentStateRevision = next.document.revision;
+      existingRecord.documentStateUpdatedAt = next.document.updatedAt;
+      existingRecord.documentStateFingerprint = LocalIrDocumentCore.comparableDocumentState(next);
+    }
+    this.sidecarScanSignatures.delete(normalizedOldPath);
+    this.sidecarScanSignatures.delete(normalizedNewPath);
+    if (!managed) {
+      await this.saveSettings({ documentPaths: [normalizedNewPath] });
+      await this.refreshViews();
+    }
+  }
+
+  private async renameManagedFile(file: TFile, targetPath: string) {
+    const oldPath = file.path;
+    this.managedRenamePaths.add(oldPath);
+    try {
+      await this.app.fileManager.renameFile(file, targetPath);
+      await this.handleVaultRename(file, oldPath, true);
+    } finally {
+      this.managedRenamePaths.delete(oldPath);
+    }
   }
 
   async moveVaultFilePath(oldPath: string, targetPath: string): Promise<string | null> {
@@ -1425,13 +1037,12 @@ export default class LocalIncrementalReadingPlugin extends Plugin {
     const folder = normalizedTargetPath.split("/").slice(0, -1).join("/");
     if (folder) await this.ensureFolder(folder);
     const finalPath = this.getUniqueVaultPath(normalizedTargetPath);
-    await this.app.fileManager.renameFile(file, finalPath);
+    await this.renameManagedFile(file, finalPath);
     return finalPath;
   }
 
   async syncRecords(options?: { save?: boolean }): Promise<DocRecord[]> {
     const files = this.getPoolFiles();
-    const activePaths = new Set(files.map((file) => file.path));
     let changed = false;
 
     for (const file of files) {
@@ -1454,13 +1065,8 @@ export default class LocalIncrementalReadingPlugin extends Plugin {
       if (await this.importDocumentStateSidecar(file)) changed = true;
     }
 
-    for (const path of Object.keys(this.settings.records)) {
-      if (!activePaths.has(path) && !this.shouldKeepRecordOutsideReadingPool(this.settings.records[path])) {
-        this.removeLinkedDataForPath(path);
-        delete this.settings.records[path];
-        changed = true;
-      }
-    }
+    // Pool membership is a queue filter, never authorization to delete processing data.
+    // A folder change, temporary index gap or external move must remain reversible.
 
     if (changed && options?.save !== false) await this.saveSettings();
     return this.getRecords();
@@ -1588,6 +1194,7 @@ export default class LocalIncrementalReadingPlugin extends Plugin {
 
   isRecordReadable(record: DocRecord): boolean {
     if (record.status === "suspended" || record.status === "done" || record.status === "export_package_ready" || record.status === "archived") return false;
+    if (!this.isPathInReadingPool(record.path) || !(this.app.vault.getAbstractFileByPath(record.path) instanceof TFile)) return false;
     return !this.isRecordDeferred(record);
   }
 
@@ -1636,14 +1243,14 @@ export default class LocalIncrementalReadingPlugin extends Plugin {
     }
 
     const record = this.settings.records[path] || await this.createRecord(file);
-    if (countVisit) {
+    if (countVisit && !this.isRecordFrozenForExport(path)) {
       record.status = "reading";
       record.deferUntil = null;
       record.visitCount += 1;
       record.lastVisited = new Date().toISOString();
       record.priority = this.calculatePriority(record.metrics);
       this.settings.records[path] = record;
-      await this.saveSettings();
+      await this.saveSettings({ documentPaths: [path] });
     }
 
     const leaf = this.app.workspace.getLeaf(false);
@@ -1652,14 +1259,14 @@ export default class LocalIncrementalReadingPlugin extends Plugin {
 
   async updateRecord(path: string, updates: Partial<DocRecord>) {
     const record = this.settings.records[path];
-    if (!record) return;
+    if (!record || this.isRecordFrozenForExport(path)) return;
     this.settings.records[path] = {
       ...record,
       ...updates,
       metrics: updates.metrics ? { ...record.metrics, ...updates.metrics } : record.metrics
     };
     this.settings.records[path].priority = this.calculatePriority(this.settings.records[path].metrics);
-    await this.saveSettings();
+    await this.saveSettings({ documentPaths: [path] });
     await this.refreshViews();
   }
 
@@ -1716,6 +1323,7 @@ export default class LocalIncrementalReadingPlugin extends Plugin {
   }
 
   async completeRecord(path: string) {
+    if (this.isRecordFrozenForExport(path)) return;
     const record = this.settings.records[path];
     if (!record) return;
     const targetPath = this.getCompletedSourceTargetPath(record);
@@ -1752,7 +1360,7 @@ export default class LocalIncrementalReadingPlugin extends Plugin {
       removedToPath: null
     };
 
-    await this.saveSettings();
+    await this.saveSettings({ documentPaths: [movedPath] });
     await this.openRecord(movedPath, false);
     await this.refreshViews();
     new Notice(`已完成阅读，原文已归入待归档区：${movedPath}`);
@@ -1985,6 +1593,10 @@ export default class LocalIncrementalReadingPlugin extends Plugin {
   }
 
   async restoreRecord(path: string, status: ReadingStatus = "reading") {
+    if (this.isRecordFrozenForExport(path)) {
+      new Notice("导出包已冻结；安全撤回完成前不能恢复阅读或移动原文。");
+      return;
+    }
     const record = this.settings.records[path];
     if (!record) return;
     let restoredPath = path;
@@ -2048,14 +1660,14 @@ export default class LocalIncrementalReadingPlugin extends Plugin {
         };
       }
     }
-    await this.saveSettings();
+    await this.saveSettings({ documentPaths: [restoredPath] });
     await this.refreshViews();
     new Notice("已恢复到阅读队列。已生成的导出包会保留，便于审计。");
   }
 
   async updateMetric(path: string, metric: MetricKey, value: number) {
     const record = this.settings.records[path];
-    if (!record) return;
+    if (!record || this.isRecordFrozenForExport(path)) return;
     record.metrics[metric] = snapMetricValue(value);
     record.metricsEditedByUser = true;
     record.priority = this.calculatePriority(record.metrics);
@@ -2065,7 +1677,7 @@ export default class LocalIncrementalReadingPlugin extends Plugin {
 
   async setExtremeImportance(path: string, enabled: boolean) {
     const record = this.settings.records[path];
-    if (!record) return;
+    if (!record || this.isRecordFrozenForExport(path)) return;
     const value = enabled ? MAX_METRIC_VALUE : DEFAULT_METRIC_VALUE;
     for (const metric of Object.keys(METRIC_LABELS) as MetricKey[]) {
       record.metrics[metric] = value;
@@ -2083,12 +1695,16 @@ export default class LocalIncrementalReadingPlugin extends Plugin {
         record.lastVisited = null;
       }
     }
-    await this.saveSettings();
+    await this.saveSettings({ flushDocumentStateSidecars: false });
     await this.refreshViews();
     new Notice("已重置今日访问记录。");
   }
 
   async refreshViews() {
+    await this.viewRefreshTask.request();
+  }
+
+  private async renderViews() {
     for (const leaf of this.app.workspace.getLeavesOfType(VIEW_TYPE_LOCAL_IR)) {
       const view = leaf.view;
       if (view instanceof LocalIRView) {
@@ -2130,7 +1746,7 @@ export default class LocalIncrementalReadingPlugin extends Plugin {
     if (!body) {
       if (existing) {
         delete this.settings.articleMusings[path];
-        await this.saveSettings();
+        await this.saveSettings({ documentPaths: [path] });
         await this.refreshViews();
         new Notice("已清空文章随想。");
       }
@@ -2147,7 +1763,7 @@ export default class LocalIncrementalReadingPlugin extends Plugin {
       updatedAt: now,
       archived: false
     });
-    await this.saveSettings();
+    await this.saveSettings({ documentPaths: [path] });
     await this.refreshViews();
     new Notice("已保存文章随想。");
   }
@@ -2179,7 +1795,7 @@ export default class LocalIncrementalReadingPlugin extends Plugin {
       updatedAt: now,
       archived: false
     });
-    await this.saveSettings();
+    await this.saveSettings({ documentPaths: [path] });
     await this.refreshViews();
     new Notice(needsAnswerGeneration || !answer ? "已保存问答卡，答案将在归档/解析时生成。" : "已保存问答卡。");
   }
@@ -2206,7 +1822,7 @@ export default class LocalIncrementalReadingPlugin extends Plugin {
       needsAnswerGeneration: card.needsAnswerGeneration || !answer,
       updatedAt: new Date().toISOString()
     });
-    await this.saveSettings();
+    await this.saveSettings({ documentPaths: [existing.path] });
     await this.refreshViews();
     new Notice("已更新问答卡。");
     return true;
@@ -2219,7 +1835,7 @@ export default class LocalIncrementalReadingPlugin extends Plugin {
       return;
     }
     delete this.settings.qaCards[id];
-    await this.saveSettings();
+    await this.saveSettings({ documentPaths: existing ? [existing.path] : [] });
     await this.refreshViews();
     new Notice("已删除问答卡。");
   }
@@ -2270,7 +1886,7 @@ export default class LocalIncrementalReadingPlugin extends Plugin {
     next = await this.refreshAnnotationHierarchy(next);
     this.settings.annotations[next.id] = next;
     this.refreshVirtualHighlights();
-    await this.saveSettings();
+    await this.saveSettings({ documentPaths: [next.path] });
     await this.refreshViews();
   }
 
@@ -2282,7 +1898,7 @@ export default class LocalIncrementalReadingPlugin extends Plugin {
     const end = clampRangeIndex(annotation.range.end, current.length);
     if (end < start) return null;
     const nextContent = `${current.slice(0, start)}${annotation.currentText}${current.slice(end)}`;
-    const changed = await this.updateContentInEditorOrFile(annotation.path, () => nextContent);
+    await this.updateContentInEditorOrFile(annotation.path, () => nextContent);
     const nextRange = { start, end: start + annotation.currentText.length };
     return {
       ...annotation,
@@ -2313,6 +1929,7 @@ export default class LocalIncrementalReadingPlugin extends Plugin {
   async saveAnnotationDraft(annotation: AnnotationRecord) {
     const existing = this.settings.annotations[annotation.id];
     if (!existing || annotation.sourceFormat === "legacy") return;
+    if (this.isRecordFrozenForExport(existing.path)) return;
 
     const next = normalizeAnnotation(annotation.id, {
       ...existing,
@@ -2323,8 +1940,8 @@ export default class LocalIncrementalReadingPlugin extends Plugin {
       updatedAt: new Date().toISOString()
     });
     this.settings.annotations[next.id] = next;
-    await this.saveSettings();
-    await this.refreshViews();
+    await this.saveSettings({ documentPaths: [next.path] });
+    // The modal owns its draft; refresh the sidebar once on close, not per keystroke.
   }
 
   openAnnotationModal(annotation: AnnotationRecord) {
@@ -3152,6 +2769,7 @@ export default class LocalIncrementalReadingPlugin extends Plugin {
       new Notice("当前没有可撤销高亮的 Markdown 文件。");
       return;
     }
+    if (this.isRecordFrozenForExport(activePath)) return;
     while (true) {
       const actionIndex = findLastIndex(this.recentHighlightActions, (action) => action.path === activePath);
       if (actionIndex < 0) break;
@@ -3267,7 +2885,7 @@ export default class LocalIncrementalReadingPlugin extends Plugin {
     this.recentHighlightActions.push(undoAction);
     this.recentHighlightActions = this.recentHighlightActions.slice(-20);
     this.refreshVirtualHighlights(path);
-    await this.saveSettings();
+    await this.saveSettings({ documentPaths: [path] });
     await this.refreshViews();
     new Notice("已重做最近虚拟高亮。");
   }
@@ -3284,6 +2902,7 @@ export default class LocalIncrementalReadingPlugin extends Plugin {
   }
 
   async reconcileAnnotationsForPath(path: string, content?: string) {
+    if (this.isRecordFrozenForExport(path)) return;
     const source = content ?? await this.readVaultFile(path);
     if (source === null) return;
     const repaired = await this.repairDangerousMarksForPath(path, { content: source, silent: true, refresh: false });
@@ -3333,6 +2952,7 @@ export default class LocalIncrementalReadingPlugin extends Plugin {
   }
 
   async repairDangerousMarksForPath(path: string, options?: { content?: string; silent?: boolean; refresh?: boolean }): Promise<boolean> {
+    if (this.isRecordFrozenForExport(path)) return false;
     const content = options?.content ?? this.getActiveEditorForPath(path)?.getValue() ?? await this.readVaultFile(path);
     if (content === null) return false;
     const dangerousRanges = findAllMarkRanges(content).filter((range) => isDangerousMarkedRange(range, content));
@@ -3477,6 +3097,7 @@ export default class LocalIncrementalReadingPlugin extends Plugin {
   }
 
   mapVirtualRangesForEditorChange(path: string, update: ViewUpdate) {
+    if (this.isRecordFrozenForExport(path)) return;
     let changed = false;
     for (const annotation of this.getAnnotationsForPath(path)) {
       if (annotation.renderMode !== "virtual_decoration" || annotation.orphaned) continue;
@@ -3528,12 +3149,14 @@ export default class LocalIncrementalReadingPlugin extends Plugin {
   }
 
   async rebindAnnotationToSelection(annotation: AnnotationRecord) {
+    if (annotation.archived || this.isRecordFrozenForExport(annotation.path)) return;
     const active = this.app.workspace.activeEditor;
     if (!active?.editor || !active.file) {
       new Notice("当前没有可用选区。");
       return;
     }
 
+    if (this.isRecordFrozenForExport(active.file.path)) return;
     const selection = getNormalizedSelection(active.editor);
     const selectedText = selection?.text || "";
     if (!selectedText.trim()) {
@@ -4189,2904 +3812,4 @@ export default class LocalIncrementalReadingPlugin extends Plugin {
       }
     }
   }
-}
-
-class LocalIRView extends ItemView {
-  plugin: LocalIncrementalReadingPlugin;
-
-  constructor(leaf: WorkspaceLeaf, plugin: LocalIncrementalReadingPlugin) {
-    super(leaf);
-    this.plugin = plugin;
-  }
-
-  getViewType(): string {
-    return VIEW_TYPE_LOCAL_IR;
-  }
-
-  getDisplayText(): string {
-    return "Local Incremental Reading";
-  }
-
-  getIcon(): string {
-    return "list-checks";
-  }
-
-  async onOpen() {
-    window.setTimeout(() => {
-      void (async () => {
-        await this.plugin.syncRecords();
-        await this.render();
-      })();
-    }, 0);
-  }
-
-  async render() {
-    try {
-      await this.renderUnsafe();
-    } catch (error) {
-      const container = this.getContentContainer();
-      container.empty();
-      container.addClass("local-ir-view");
-      container.createEl("h2", { text: "本地渐进阅读" });
-      container.createEl("div", {
-        cls: "local-ir-muted",
-        text: `面板渲染失败：${error instanceof Error ? error.message : String(error)}`
-      });
-      console.error("Local Incremental Reading render failed", error);
-    }
-  }
-
-  getContentContainer(): Element {
-    const child = this.containerEl.children[1];
-    return child || this.containerEl;
-  }
-
-  async renderUnsafe() {
-    const container = this.getContentContainer();
-    container.empty();
-    container.addClass("local-ir-view");
-
-    container.createEl("h2", { text: "本地渐进阅读" });
-    container.createEl("div", {
-      cls: "local-ir-muted",
-      text: "核心阅读、深度高亮与本地加工"
-    });
-
-    await this.renderActiveDocControls(container);
-    this.renderProcessingToolbar(container);
-    await this.renderActiveDocDetails(container);
-    this.renderPendingImports(container);
-    this.renderReadingPoolToolbar(container);
-    this.renderStats(container);
-    this.renderLists(container);
-  }
-
-  renderProcessingToolbar(container: Element) {
-    const card = container.createDiv({ cls: "local-ir-card" });
-    card.createEl("h3", { text: "阅读加工工具" });
-    const toolbar = card.createDiv({ cls: "local-ir-toolbar" });
-    const modeLabel = toolbar.createEl("label", { cls: "local-ir-toggle" });
-    const modeInput = modeLabel.createEl("input", { type: "checkbox" });
-    modeLabel.createSpan({ text: "加工模式" });
-    modeInput.checked = this.plugin.settings.processingModeEnabled;
-    modeInput.addEventListener("change", async () => {
-      this.plugin.settings.processingModeEnabled = modeInput.checked;
-      if (modeInput.checked) {
-        this.plugin.settings.clozeModeEnabled = false;
-        clozeInput.checked = false;
-      }
-      await this.plugin.saveSettings();
-      new Notice(modeInput.checked ? "加工模式已开启。选中文本会自动高亮。" : "加工模式已关闭。");
-    });
-
-    const clozeLabel = toolbar.createEl("label", { cls: "local-ir-toggle" });
-    const clozeInput = clozeLabel.createEl("input", { type: "checkbox" });
-    clozeLabel.createSpan({ text: "挖空模式" });
-    clozeInput.checked = this.plugin.settings.clozeModeEnabled;
-    clozeInput.addEventListener("change", async () => {
-      this.plugin.settings.clozeModeEnabled = clozeInput.checked;
-      if (clozeInput.checked) {
-        this.plugin.settings.processingModeEnabled = false;
-        modeInput.checked = false;
-      }
-      await this.plugin.saveSettings();
-      new Notice(clozeInput.checked ? "挖空模式已开启。选中文本会自动挖空标注。" : "挖空模式已关闭。");
-    });
-
-    const mergeLabel = toolbar.createEl("label", { cls: "local-ir-toggle" });
-    const mergeInput = mergeLabel.createEl("input", { type: "checkbox" });
-    mergeLabel.createSpan({ text: "自动合并" });
-    mergeInput.checked = this.plugin.settings.autoMergeHighlightsEnabled;
-    mergeInput.addEventListener("change", async () => {
-      this.plugin.settings.autoMergeHighlightsEnabled = mergeInput.checked;
-      await this.plugin.saveSettings();
-      new Notice(mergeInput.checked ? "自动合并已开启。同一 block 内高亮会合并。" : "自动合并已关闭。");
-    });
-
-    const virtualLabel = toolbar.createEl("label", { cls: "local-ir-toggle" });
-    const virtualInput = virtualLabel.createEl("input", { type: "checkbox" });
-    virtualLabel.createSpan({ text: "全部虚拟高亮" });
-    virtualInput.checked = this.plugin.settings.alwaysVirtualHighlightsEnabled;
-    virtualInput.addEventListener("change", async () => {
-      this.plugin.settings.alwaysVirtualHighlightsEnabled = virtualInput.checked;
-      await this.plugin.saveSettings();
-      new Notice(virtualInput.checked ? "全部虚拟高亮已开启。新高亮不会写入 Markdown。" : "全部虚拟高亮已关闭。普通正文会继续写入 mark。");
-    });
-
-    toolbar.createDiv({
-      cls: "local-ir-muted",
-      text: "手动合并：按住左 Alt 点击多个高亮，松开后合并。"
-    });
-
-    const undoButton = toolbar.createEl("button", {
-      text: "撤销最近高亮",
-      cls: "local-ir-button"
-    });
-    undoButton.addEventListener("click", () => void this.plugin.undoRecentHighlight());
-
-    const repairButton = toolbar.createEl("button", {
-      text: "修复当前文件高亮",
-      cls: "local-ir-button"
-    });
-    repairButton.addEventListener("click", () => void this.plugin.repairActiveFileDangerousMarks());
-  }
-
-  renderReadingPoolToolbar(container: Element) {
-    const card = container.createDiv({ cls: "local-ir-card" });
-    card.createEl("h3", { text: "阅读池管理" });
-    card.createDiv({
-      cls: "local-ir-muted",
-      text: `阅读池：${this.plugin.getReadingFolders().join(" / ")}`
-    });
-    const toolbar = card.createDiv({ cls: "local-ir-toolbar" });
-
-    const continueButton = toolbar.createEl("button", {
-      text: "继续阅读",
-      cls: "local-ir-button local-ir-primary"
-    });
-    continueButton.addEventListener("click", () => void this.plugin.continueReading());
-
-    const scanButton = toolbar.createEl("button", {
-      text: "刷新阅读池",
-      cls: "local-ir-button"
-    });
-    scanButton.addEventListener("click", () => void (async () => {
-      await this.plugin.syncRecords();
-      await this.render();
-    })());
-
-    const batchArchiveButton = toolbar.createEl("button", {
-      text: "批量生成 RemNote 导出包",
-      cls: "local-ir-button"
-    });
-    batchArchiveButton.addEventListener("click", () => void this.plugin.batchArchiveDoneRecords());
-
-    const addFolderButton = toolbar.createEl("button", {
-      text: "添加阅读池文件夹",
-      cls: "local-ir-button"
-    });
-    addFolderButton.addEventListener("click", () => {
-      new FolderPickerModal(this.app, this.plugin, async (folder) => {
-        await this.plugin.addReadingFolder(folder.path);
-      }, "搜索并添加阅读池文件夹").open();
-    });
-
-    const useActiveFolderButton = toolbar.createEl("button", {
-      text: "当前文件夹加入阅读池",
-      cls: "local-ir-button"
-    });
-    useActiveFolderButton.addEventListener("click", () => {
-      const folder = this.plugin.getActiveFolderPath();
-      if (!folder) {
-        new Notice("当前没有打开的 Markdown 文件。");
-        return;
-      }
-      void this.plugin.addReadingFolder(folder);
-    });
-
-    const moveActiveFileButton = toolbar.createEl("button", {
-      text: "当前文件放入阅读池",
-      cls: "local-ir-button"
-    });
-    moveActiveFileButton.addEventListener("click", () => void this.plugin.moveActiveFileToReadingPool());
-
-    const moveOutFileButton = toolbar.createEl("button", {
-      text: "当前文件移出阅读池",
-      cls: "local-ir-button"
-    });
-    moveOutFileButton.addEventListener("click", () => void this.plugin.moveActiveFileOutOfReadingPool());
-
-    const resetButton = toolbar.createEl("button", {
-      text: "重置今日访问",
-      cls: "local-ir-button"
-    });
-    resetButton.addEventListener("click", () => void this.plugin.resetTodayVisits());
-  }
-
-  renderStats(container: Element) {
-    const records = this.plugin.getRecords();
-    const today = todayKey();
-    const active = records.filter((record) => this.plugin.isRecordReadable(record));
-    const visitedToday = records.filter((record) => isDateOnDay(record.lastVisited, today));
-    const later = records.filter((record) => record.status === "later");
-    const suspended = records.filter((record) => record.status === "suspended");
-    const done = records.filter((record) => record.status === "done");
-    const exportReady = records.filter((record) => record.status === "export_package_ready");
-    const archived = records.filter((record) => record.status === "archived");
-
-    const statCard = container.createDiv({ cls: "local-ir-card" });
-    statCard.createEl("h3", { text: "阅读池统计" });
-    const grid = statCard.createDiv({ cls: "local-ir-stat-grid" });
-    this.stat(grid, "总数", records.length);
-    this.stat(grid, "可读", active.length);
-    this.stat(grid, "今日已访问", visitedToday.length);
-    this.stat(grid, "Later", later.length);
-    this.stat(grid, "搁置", suspended.length);
-    this.stat(grid, "待生成导出包", done.length);
-    this.stat(grid, "导出包已准备", exportReady.length);
-    this.stat(grid, "正式归档成功", archived.length);
-  }
-
-  stat(container: Element, label: string, value: number) {
-    const stat = container.createDiv({ cls: "local-ir-stat" });
-    stat.createEl("strong", { text: String(value) });
-    stat.createEl("span", { text: label });
-  }
-
-  async renderActiveDocControls(container: Element) {
-    const record = this.plugin.getActiveRecord();
-    const card = container.createDiv({ cls: "local-ir-card" });
-    card.createEl("h3", { text: "当前文档控制" });
-
-    if (!record) {
-      card.createEl("div", {
-        cls: "local-ir-muted",
-        text: "当前打开的文件不在阅读池中。"
-      });
-      return;
-    }
-    await this.plugin.repairDangerousMarksForPath(record.path, { silent: true, refresh: false });
-
-    card.createEl("div", { cls: "local-ir-doc-title", text: record.title });
-    const docMeta = card.createEl("div", {
-      cls: "local-ir-doc-meta",
-      text: `${STATUS_LABELS[record.status]} · priority ${record.priority.toFixed(2)} · visits ${record.visitCount}${record.deferUntil ? ` · defer until ${record.deferUntil}` : ""}`
-    });
-
-    const metricInputs = new Map<MetricKey, HTMLInputElement>();
-    const metricValueLabels = new Map<MetricKey, HTMLSpanElement>();
-    let extremeInput: HTMLInputElement | null = null;
-    const updateMetricControlDisplay = () => {
-      const previewMetrics = { ...record.metrics };
-      for (const [key, input] of metricInputs) {
-        const value = snapMetricValue(Number(input.value));
-        previewMetrics[key] = value;
-        metricValueLabels.get(key)?.setText(metricLevelLabel(value));
-      }
-      const previewPriority = this.plugin.calculatePriority(previewMetrics);
-      docMeta.setText(`${STATUS_LABELS[record.status]} · priority ${previewPriority.toFixed(2)} · visits ${record.visitCount}${record.deferUntil ? ` · defer until ${record.deferUntil}` : ""}`);
-      if (extremeInput) extremeInput.checked = isExtremePriorityMetrics(previewMetrics);
-    };
-
-    (Object.keys(METRIC_LABELS) as MetricKey[]).forEach((key) => {
-      const metric = card.createDiv({ cls: "local-ir-metric" });
-      const label = metric.createEl("label");
-      label.createSpan({ text: METRIC_LABELS[key] });
-      const valueLabel = label.createSpan({ text: metricLevelLabel(record.metrics[key]) });
-      const input = metric.createEl("input", {
-        type: "range",
-        attr: {
-          "aria-label": METRIC_LABELS[key],
-          min: "0",
-          max: "10",
-          step: "2.5",
-          value: String(snapMetricValue(record.metrics[key]))
-        }
-      });
-      metricInputs.set(key, input);
-      metricValueLabels.set(key, valueLabel);
-      input.addEventListener("input", updateMetricControlDisplay);
-      input.addEventListener("change", () => {
-        updateMetricControlDisplay();
-        void this.plugin.updateMetric(record.path, key, Number(input.value)).catch((error) => {
-          console.error(`Local IR: failed to update ${key} for ${record.path}`, error);
-          new Notice("档位保存失败，请重试。");
-        });
-      });
-    });
-
-    const extreme = card.createDiv({ cls: "local-ir-metric" });
-    const extremeLabel = extreme.createEl("label");
-    extremeLabel.createSpan({ text: "极度重要" });
-    extremeInput = extremeLabel.createEl("input", {
-      type: "checkbox",
-      attr: { "aria-label": "极度重要" }
-    });
-    extremeInput.checked = isExtremePriorityMetrics(record.metrics);
-    extremeInput.addEventListener("change", () => {
-      const enabled = extremeInput?.checked === true;
-      const value = enabled ? MAX_METRIC_VALUE : DEFAULT_METRIC_VALUE;
-      for (const input of metricInputs.values()) input.value = String(value);
-      updateMetricControlDisplay();
-      void this.plugin.setExtremeImportance(record.path, enabled).catch((error) => {
-        console.error(`Local IR: failed to set extreme importance for ${record.path}`, error);
-        new Notice("极度重要保存失败，请重试。");
-      });
-    });
-
-    const actions = card.createDiv({ cls: "local-ir-toolbar" });
-    if (record.status === "archived") {
-      actions.createDiv({ cls: "local-ir-muted", text: "正式归档结果由工程五 receipt 回写；插件不直接撤销 RemNote 状态。" });
-    } else if (record.status === "export_package_ready") {
-      actions.createDiv({ cls: "local-ir-muted", text: "导出包已冻结并留在队列；原文仍在待归档区，尚未正式归档。" });
-    } else if (record.status === "later") {
-      this.action(actions, "取消 Later", () => this.plugin.restoreRecord(record.path));
-    } else if (record.status === "suspended" || record.status === "done") {
-      this.action(actions, "恢复阅读中", () => this.plugin.restoreRecord(record.path));
-    } else {
-      this.action(actions, "明天", () => this.plugin.deferRecord(record.path, 1));
-      this.action(actions, "3 天", () => this.plugin.deferRecord(record.path, 3));
-      this.action(actions, "1 周", () => this.plugin.deferRecord(record.path, 7));
-      this.action(actions, "自定义天数", () => {
-        new NumberInputModal(this.app, "自定义推迟天数", this.plugin.settings.defaultDeferDays, (days) => this.plugin.deferRecord(record.path, days)).open();
-        return Promise.resolve();
-      });
-      this.action(actions, "搁置", () => this.plugin.updateRecord(record.path, { status: "suspended", deferUntil: null }));
-      this.action(actions, "完成阅读", () => this.plugin.completeRecord(record.path));
-    }
-  }
-
-  async renderActiveDocDetails(container: Element) {
-    const record = this.plugin.getActiveRecord();
-    if (!record) return;
-    const card = container.createDiv({ cls: "local-ir-card" });
-    card.createEl("h3", { text: "当前文档详情" });
-    await this.renderArticleMusing(card, record.path);
-    await this.renderQaCards(card, record.path);
-    await this.renderAnnotations(card, record.path);
-  }
-
-  renderLists(container: Element) {
-    const records = this.plugin.getRecords();
-    const today = todayKey();
-
-    this.renderList(
-      container,
-      "高优先级",
-      records.filter((record) => this.plugin.isRecordReadable(record)).slice(0, 8)
-    );
-
-    this.renderList(
-      container,
-      "今日已访问",
-      records.filter((record) => isDateOnDay(record.lastVisited, today)).slice(0, 8)
-    );
-
-    this.renderList(
-      container,
-      "Later",
-      records.filter((record) => record.status === "later").sort((a, b) => (a.deferUntil || "").localeCompare(b.deferUntil || "")).slice(0, 8)
-    );
-
-    this.renderList(
-      container,
-      "待生成导出包",
-      records.filter((record) => record.status === "done").slice(0, 8)
-    );
-
-    this.renderList(
-      container,
-      "导出包已准备（尚未正式归档）",
-      records.filter((record) => record.status === "export_package_ready").slice(0, 8)
-    );
-
-    this.renderList(
-      container,
-      "正式归档成功",
-      records.filter((record) => record.status === "archived").slice(0, 8)
-    );
-
-    this.renderList(
-      container,
-      "搁置",
-      records.filter((record) => record.status === "suspended").slice(0, 8)
-    );
-  }
-
-  renderList(container: Element, title: string, records: DocRecord[]) {
-    const card = container.createDiv({ cls: "local-ir-card" });
-    card.createEl("h3", { text: title });
-
-    if (records.length === 0) {
-      card.createEl("div", { cls: "local-ir-muted", text: "暂无" });
-      return;
-    }
-
-    for (const record of records) {
-      const row = card.createDiv({ cls: "local-ir-doc-row" });
-      const titleEl = row.createDiv({ cls: "local-ir-doc-title", text: record.title });
-      titleEl.addEventListener("click", () => void this.plugin.openRecord(record.path, false));
-      row.createDiv({
-        cls: "local-ir-doc-meta",
-        text: `${STATUS_LABELS[record.status]} · priority ${record.priority.toFixed(2)} · visits ${record.visitCount}${record.deferUntil ? ` · defer until ${record.deferUntil}` : ""}`
-      });
-      if (record.status === "done" && (record.archiveLastFailure || record.archiveLastError)) {
-        const label = record.archiveLastFailure?.kind === "blocked" ? "生成受阻" : "上次生成失败";
-        row.createDiv({
-          cls: "local-ir-pending-error",
-          text: `${label}：${record.archiveLastError || record.archiveLastFailure?.message || "未知错误"}`
-        });
-        const validatorErrors = record.archiveLastFailure?.details.errors || [];
-        if (validatorErrors.length > 0) {
-          row.createDiv({
-            cls: "local-ir-doc-meta",
-            text: `生产者校验：${validatorErrors.join("；")}`
-          });
-        }
-      }
-      if (record.status === "suspended" || record.status === "done" || record.status === "later") {
-        const rowActions = row.createDiv({ cls: "local-ir-row-actions" });
-        if (record.status === "done") {
-          const archive = rowActions.createEl("button", {
-            text: "生成导出包",
-            cls: "local-ir-button"
-          });
-          archive.disabled = this.plugin.singleArchivePathsInProgress.has(record.path) || this.plugin.batchArchiveInProgress;
-          archive.addEventListener("click", (event) => {
-            event.stopPropagation();
-            archive.disabled = true;
-            void this.plugin.archiveRecord(record.path);
-          });
-        }
-        const restore = rowActions.createEl("button", {
-          text: record.status === "later" ? "取消 Later" : "恢复",
-          cls: "local-ir-button"
-        });
-        restore.addEventListener("click", (event) => {
-          event.stopPropagation();
-          void this.plugin.restoreRecord(record.path);
-        });
-      }
-    }
-  }
-
-  renderPendingImports(container: Element) {
-    const card = container.createDiv({ cls: "local-ir-card" });
-    card.createEl("h3", { text: `待导入列表（${this.plugin.settings.pendingImports.length}）` });
-    card.createDiv({
-      cls: "local-ir-muted",
-      text: "可一次粘贴多个网页链接；按标准化 URL 去重，并行进入与浏览器“导入本地”相同的标准工作流。失败条目会保留以便重试。"
-    });
-
-    const inputArea = card.createDiv({ cls: "local-ir-link-import-box" });
-    const input = inputArea.createEl("textarea", { cls: "local-ir-link-import-input" });
-    input.placeholder = "粘贴一个或多个 http/https 链接；可混合换行、文字或 Markdown 链接。";
-    const inputMeta = inputArea.createDiv({ cls: "local-ir-doc-meta", text: "尚未识别链接。" });
-    const inputActions = inputArea.createDiv({ cls: "local-ir-row-actions" });
-    const importLinksButton = inputActions.createEl("button", {
-      cls: "local-ir-button",
-      text: "标准导入链接"
-    });
-    const updateInputState = () => {
-      const count = extractExternalUrls(input.value).length;
-      inputMeta.textContent = count ? `已识别 ${count} 个有效链接。` : "尚未识别链接。";
-      importLinksButton.disabled = count === 0;
-    };
-    input.addEventListener("input", updateInputState);
-    importLinksButton.addEventListener("click", () => {
-      const value = input.value;
-      input.disabled = true;
-      importLinksButton.disabled = true;
-      inputMeta.textContent = "正在加入队列并启动标准导入…";
-      void this.plugin.queueAndImportLinks(value).catch((error) => {
-        input.disabled = false;
-        updateInputState();
-        new Notice(`批量导入失败：${error instanceof Error ? error.message : String(error)}`);
-      });
-    });
-    updateInputState();
-
-    if (this.plugin.settings.pendingImports.length === 0) {
-      card.createDiv({ cls: "local-ir-muted", text: "暂无待导入链接。" });
-      return;
-    }
-
-    for (const item of this.plugin.settings.pendingImports) {
-      const row = card.createDiv({ cls: "local-ir-doc-row" });
-      const link = row.createEl("a", {
-        cls: "local-ir-pending-url",
-        text: item.url,
-        href: item.url
-      });
-      link.setAttr("target", "_blank");
-      link.setAttr("rel", "noopener noreferrer");
-      const statusLabel = item.status === "importing" ? "导入中" : item.status === "failed" ? "失败，可重试" : "待导入";
-      row.createDiv({
-        cls: "local-ir-doc-meta",
-        text: `${statusLabel} · 加入 ${item.addedAt} · 尝试 ${item.attemptCount} 次`
-      });
-      if (item.sourcePath) {
-        row.createDiv({ cls: "local-ir-doc-meta", text: `来源文档：${item.sourcePath}` });
-      }
-      if (item.lastError) {
-        row.createDiv({ cls: "local-ir-pending-error", text: item.lastError });
-      }
-      const actions = row.createDiv({ cls: "local-ir-row-actions" });
-      const importButton = actions.createEl("button", {
-        cls: "local-ir-button",
-        text: item.status === "failed" ? "重试导入" : item.status === "importing" ? "导入中…" : "立即导入"
-      });
-      importButton.disabled = item.status === "importing";
-      importButton.addEventListener("click", () => void this.plugin.importPendingImport(item.id));
-      const removeButton = actions.createEl("button", {
-        cls: "local-ir-button",
-        text: "移除"
-      });
-      removeButton.disabled = item.status === "importing";
-      removeButton.addEventListener("click", () => void this.plugin.removePendingImport(item.id));
-    }
-  }
-
-  async renderArticleMusing(container: Element, path: string) {
-    const musing = this.plugin.getArticleMusing(path);
-    const isArchived = this.plugin.isRecordFrozenForExport(path) || Boolean(musing?.archived);
-    const section = container.createDiv({ cls: "local-ir-qa-section" });
-    section.createEl("h3", { text: "文章随想" });
-    section.createDiv({
-      cls: "local-ir-muted",
-      text: "记录你对全文的随想或总批注。native-v2 会完整携带随想，正式导入由工程五写入 RemNote 并回读。"
-    });
-
-    const input = section.createEl("textarea", { cls: "local-ir-qa-input local-ir-qa-answer" });
-    input.placeholder = "写下这篇文章触发的想法、判断、疑问或后续要处理的线索。";
-    input.value = musing?.bodyMarkdown || "";
-    input.disabled = isArchived;
-
-    const actions = section.createDiv({ cls: "local-ir-toolbar" });
-    if (!isArchived) {
-      this.action(actions, "保存随想", () => this.plugin.saveArticleMusing(path, input.value));
-    }
-    if (musing?.bodyMarkdown.trim()) {
-      section.createDiv({
-        cls: "local-ir-doc-meta",
-        text: `${this.plugin.isRecordFrozenForExport(path) ? "输入已冻结" : "可编辑"} · AI 解析状态：${musing.aiStatus}`
-      });
-    }
-  }
-
-  async renderQaCards(container: Element, path: string) {
-    const cards = this.plugin.getQaCardsForPath(path);
-    const isFrozen = this.plugin.isRecordFrozenForExport(path);
-    const section = container.createDiv({ cls: "local-ir-qa-section" });
-    section.createEl("h3", { text: "文章问答卡" });
-    section.createDiv({
-      cls: "local-ir-muted",
-      text: "保存的问题会在归档包中进入 RemNote 问答卡队列；答案可手写，也可留空后由 qa:resolve 生成。"
-    });
-
-    const questionInput = section.createEl("textarea", { cls: "local-ir-qa-input" });
-    questionInput.placeholder = "输入这篇文章要回答的问题";
-    questionInput.disabled = isFrozen;
-    const answerInput = section.createEl("textarea", { cls: "local-ir-qa-input local-ir-qa-answer" });
-    answerInput.placeholder = "可选：手写答案。留空时点击生成答案会进入 API 解析队列。";
-    answerInput.disabled = isFrozen;
-
-    const actions = section.createDiv({ cls: "local-ir-toolbar" });
-    if (!isFrozen) {
-      this.action(actions, "保存问答卡", () => this.plugin.saveArticleQaCard(path, questionInput.value, answerInput.value, false));
-      this.action(actions, "生成答案", () => this.plugin.saveArticleQaCard(path, questionInput.value, answerInput.value, true));
-    }
-
-    if (cards.length === 0) {
-      section.createEl("div", { cls: "local-ir-muted", text: "暂无文章级问答卡。" });
-      return;
-    }
-
-    for (const card of cards) {
-      const row = section.createDiv({ cls: "local-ir-doc-row local-ir-qa-row" });
-      row.createDiv({ cls: "local-ir-doc-title", text: truncate(card.questionMarkdown || "未命名问题", 80) });
-      row.createDiv({
-        cls: "local-ir-doc-meta",
-        text: `${card.needsAnswerGeneration ? "待生成答案" : "已有答案"} · ${isFrozen ? "输入已冻结" : "可编辑"}`
-      });
-      const preview = row.createDiv({ cls: "local-ir-qa-preview" });
-      preview.setText(renderQaCardPreview(card));
-      row.addEventListener("click", () => this.plugin.openQaCardModal(card));
-      const rowActions = row.createDiv({ cls: "local-ir-row-actions" });
-      const edit = rowActions.createEl("button", { text: isFrozen || card.archived ? "查看" : "编辑", cls: "local-ir-button" });
-      edit.addEventListener("click", (event) => {
-        event.stopPropagation();
-        this.plugin.openQaCardModal(card);
-      });
-      const del = rowActions.createEl("button", { text: "删除", cls: "local-ir-button" });
-      del.addEventListener("click", (event) => {
-        event.stopPropagation();
-        void this.plugin.deleteQaCard(card.id);
-      });
-    }
-  }
-
-  async renderAnnotations(container: Element, path: string) {
-    const annotations = this.plugin.getAnnotationsForPath(path);
-    const linkedAnnotations = annotations.filter((annotation) => !annotation.orphaned);
-    const orphanedAnnotations = annotations.filter((annotation) => annotation.orphaned);
-    const legacyHighlights = await this.plugin.getLegacyHighlightsForPath(path);
-    const sourceContent = await this.plugin.readVaultFile(path);
-    const section = container.createDiv({ cls: "local-ir-annotations" });
-    section.createEl("h3", { text: "本文高亮/评论" });
-
-    if (linkedAnnotations.length === 0 && legacyHighlights.length === 0) {
-      section.createEl("div", {
-        cls: "local-ir-muted",
-        text: "暂无。开启加工模式后，选中文本只会自动高亮；需要加工时再点击高亮。"
-      });
-    }
-
-    for (const annotation of linkedAnnotations) {
-      const displayHierarchy = sourceContent ? resolveAnnotationHierarchy(sourceContent, annotation) : annotation;
-      const row = section.createDiv({ cls: "local-ir-doc-row local-ir-annotation-row" });
-      row.createDiv({
-        cls: "local-ir-doc-title",
-        text: truncate(annotation.currentText || annotation.selectedText, 80)
-      });
-      row.createDiv({
-        cls: "local-ir-doc-meta",
-        text: `${annotation.markKind === "cloze" ? "挖空 · " : ""}${annotation.renderMode === "virtual_decoration" ? "特殊格式 · " : ""}${ANNOTATION_LABELS[annotation.type]} · ${displayHierarchy.scope !== "selection" ? "包含子层级 · " : ""}${annotation.hasRewrite ? "有改写" : "无改写"} · ${annotation.archived ? "已归档" : "未归档"}`
-      });
-      row.addEventListener("click", async () => {
-        await this.plugin.openRecord(annotation.path, false);
-        this.plugin.openAnnotationModal(annotation);
-      });
-    }
-
-    for (const legacy of legacyHighlights) {
-      const row = section.createDiv({ cls: "local-ir-doc-row local-ir-annotation-row" });
-      row.createDiv({
-        cls: "local-ir-doc-title",
-        text: truncate(legacy.text, 80)
-      });
-      row.createDiv({
-        cls: "local-ir-doc-meta",
-        text: "旧高亮 · 未加工"
-      });
-      row.addEventListener("click", () => {
-        this.plugin.openAnnotationModal(this.plugin.createAnnotation(createAnnotationId(), legacy.path, legacy.text, "legacy", legacy.startOffset));
-      });
-    }
-
-    if (orphanedAnnotations.length > 0) {
-      section.createEl("h3", { text: "孤立记录" });
-      for (const annotation of orphanedAnnotations) {
-        const row = section.createDiv({ cls: "local-ir-doc-row local-ir-annotation-row local-ir-orphaned" });
-        row.createDiv({
-          cls: "local-ir-doc-title",
-          text: truncate(annotation.currentText || annotation.selectedText, 80)
-        });
-      row.createDiv({
-        cls: "local-ir-doc-meta",
-        text: `${annotation.markKind === "cloze" ? "挖空 · " : ""}${annotation.renderMode === "virtual_decoration" ? "特殊格式 · " : ""}${ANNOTATION_LABELS[annotation.type]} · ${annotation.hasRewrite ? "有改写" : "无改写"} · 原高亮已不存在`
-      });
-        row.addEventListener("click", () => this.plugin.openAnnotationModal(annotation));
-      }
-    }
-  }
-
-  action(container: Element, label: string, handler: () => Promise<void>) {
-    const button = container.createEl("button", { text: label, cls: "local-ir-button" });
-    button.addEventListener("click", () => void handler());
-  }
-}
-
-class NoRemnoteContentConfirmationModal extends Modal {
-  entries: NoRemnoteContentPreflight[];
-  resolveConfirmation: (confirmed: boolean) => void;
-  resolved = false;
-
-  constructor(app: App, entries: NoRemnoteContentPreflight[], resolveConfirmation: (confirmed: boolean) => void) {
-    super(app);
-    this.entries = entries;
-    this.resolveConfirmation = resolveConfirmation;
-  }
-
-  onOpen() {
-    const { contentEl } = this;
-    contentEl.empty();
-    contentEl.createEl("h2", { text: "确认生成无 RemNote 内容的导出包" });
-    contentEl.createDiv({
-      cls: "local-ir-muted",
-      text: "以下文章没有可写入 RemNote 的批注、已解析 QA、挖空或随想。已有高亮/提问仍会保留在 refined/question 派生产物中；确认不会伪造 RemNote 内容，也不代表正式归档成功。"
-    });
-    const list = contentEl.createEl("ul", { cls: "local-ir-confirmation-list" });
-    for (const entry of this.entries) {
-      const missing = entry.missingElementKinds.map((kind) => ARCHIVE_ELEMENT_LABELS[kind] || kind).join("、");
-      list.createEl("li", { text: `${entry.title}：缺少 ${missing}` });
-    }
-    const buttons = contentEl.createDiv({ cls: "local-ir-modal-buttons" });
-    const cancel = buttons.createEl("button", { text: "取消，保持待生成", cls: "local-ir-button" });
-    cancel.addEventListener("click", () => this.finish(false));
-    const confirm = buttons.createEl("button", { text: "确认并生成导出包", cls: "local-ir-button local-ir-primary" });
-    confirm.addEventListener("click", () => this.finish(true));
-  }
-
-  finish(confirmed: boolean) {
-    if (this.resolved) return;
-    this.resolved = true;
-    this.resolveConfirmation(confirmed);
-    this.close();
-  }
-
-  onClose() {
-    if (!this.resolved) {
-      this.resolved = true;
-      this.resolveConfirmation(false);
-    }
-    this.contentEl.empty();
-  }
-}
-
-class LocalIRSettingTab extends PluginSettingTab {
-  plugin: LocalIncrementalReadingPlugin;
-
-  constructor(app: App, plugin: LocalIncrementalReadingPlugin) {
-    super(app, plugin);
-    this.plugin = plugin;
-  }
-
-  display(): void {
-    const { containerEl } = this;
-    containerEl.empty();
-    containerEl.createEl("h2", { text: "Local Incremental Reading" });
-
-    containerEl.createEl("h3", { text: "阅读池文件夹" });
-    containerEl.createDiv({
-      cls: "setting-item-description",
-      text: "可以设置多个阅读池；第一项用于自动移入当前文件。"
-    });
-    for (const folder of this.plugin.getReadingFolders()) {
-      new Setting(containerEl)
-        .setName(folder === this.plugin.getPrimaryReadingFolder() ? `${folder}（第一阅读池）` : folder)
-        .addButton((button) => {
-          button
-            .setButtonText("设为第一")
-            .onClick(async () => {
-              await this.plugin.setPrimaryReadingFolder(folder);
-              this.display();
-            });
-        })
-        .addButton((button) => {
-          button
-            .setButtonText("移除")
-            .onClick(async () => {
-              await this.plugin.removeReadingFolder(folder);
-              this.display();
-            });
-        });
-    }
-
-    new Setting(containerEl)
-      .setName("添加阅读池文件夹")
-      .setDesc("输入时可按目录名搜索，也可以点右侧按钮选择。")
-      .addText((text) => {
-        new FolderInputSuggest(this.app, text.inputEl, (folder) => {
-          text.setValue(folder.path);
-        });
-        text.setPlaceholder(DEFAULT_FOLDER);
-        text.inputEl.addEventListener("keydown", (event) => {
-          if (event.key !== "Enter") return;
-          event.preventDefault();
-          void this.plugin.addReadingFolder(text.getValue()).then(() => this.display());
-        });
-      })
-      .addButton((button) => {
-        button
-          .setButtonText("选择并添加")
-          .onClick(() => {
-            new FolderPickerModal(this.app, this.plugin, async (folder) => {
-              await this.plugin.addReadingFolder(folder.path);
-              this.display();
-            }, "搜索并添加阅读池文件夹").open();
-          });
-      })
-      .addButton((button) => {
-        button
-          .setButtonText("添加当前文件夹")
-          .onClick(async () => {
-            const folder = this.plugin.getActiveFolderPath();
-            if (!folder) {
-              new Notice("当前没有打开的 Markdown 文件。");
-              return;
-            }
-            await this.plugin.addReadingFolder(folder);
-            this.display();
-          });
-      });
-
-    new Setting(containerEl)
-      .setName("排除今日已访问")
-      .setDesc("开启后，今天打开过的文档不会被继续阅读再次抽中。")
-      .addToggle((toggle) => {
-        toggle
-          .setValue(this.plugin.settings.excludeVisitedToday)
-          .onChange(async (value) => {
-            this.plugin.settings.excludeVisitedToday = value;
-            await this.plugin.saveSettings();
-            await this.plugin.refreshViews();
-          });
-      });
-
-    new Setting(containerEl)
-      .setName("绝对优先级概率")
-      .setDesc("0.2 表示 20% 概率直接打开最高优先级文档，其余按轮盘赌。")
-      .addSlider((slider) => {
-        slider
-          .setLimits(0, 1, 0.05)
-          .setValue(this.plugin.settings.absolutePriorityProbability)
-          .setDynamicTooltip()
-          .onChange(async (value) => {
-            this.plugin.settings.absolutePriorityProbability = value;
-            await this.plugin.saveSettings();
-          });
-      });
-
-    new Setting(containerEl)
-      .setName("默认推迟天数")
-      .setDesc("当前文档点 Later 自定义默认值。")
-      .addText((text) => {
-        text
-          .setPlaceholder("7")
-          .setValue(String(this.plugin.settings.defaultDeferDays))
-          .onChange(async (value) => {
-            this.plugin.settings.defaultDeferDays = Math.max(1, Math.round(Number(value) || 7));
-            await this.plugin.saveSettings();
-          });
-      });
-
-    new Setting(containerEl)
-      .setName("RemNote 导出队列目录")
-      .setDesc("归档文档会在这里生成本地 Markdown 导出包，当前版本不直接写入 RemNote。")
-      .addText((text) => {
-        new FolderInputSuggest(this.app, text.inputEl, (folder) => {
-          this.plugin.settings.archiveFolder = folder.path;
-          void this.plugin.saveSettings();
-          text.setValue(folder.path);
-        });
-        text
-          .setPlaceholder(DEFAULT_ARCHIVE_FOLDER)
-          .setValue(this.plugin.settings.archiveFolder)
-          .onChange(async (value) => {
-            this.plugin.settings.archiveFolder = normalizePath(value.trim() || DEFAULT_ARCHIVE_FOLDER);
-            await this.plugin.saveSettings();
-          });
-      })
-      .addButton((button) => {
-        button
-          .setButtonText("选择文件夹")
-          .onClick(() => {
-            new FolderPickerModal(this.app, this.plugin, async (folder) => {
-              this.plugin.settings.archiveFolder = folder.path;
-              await this.plugin.saveSettings();
-              this.display();
-            }, "搜索并选择导出队列文件夹").open();
-          });
-      });
-
-    new Setting(containerEl)
-      .setName("已归档原文目录")
-      .setDesc("这里只是正式归档的目标目录。批量生成导出包不会移动原文；只有工程五成功 receipt 后才可移动到这里。")
-      .addText((text) => {
-        new FolderInputSuggest(this.app, text.inputEl, (folder) => {
-          this.plugin.settings.sourceArchiveFolder = folder.path;
-          void this.plugin.saveSettings();
-          text.setValue(folder.path);
-        });
-        text
-          .setPlaceholder(DEFAULT_SOURCE_ARCHIVE_FOLDER)
-          .setValue(this.plugin.settings.sourceArchiveFolder)
-          .onChange(async (value) => {
-            this.plugin.settings.sourceArchiveFolder = normalizePath(value.trim() || DEFAULT_SOURCE_ARCHIVE_FOLDER);
-            await this.plugin.saveSettings();
-          });
-      })
-      .addButton((button) => {
-        button
-          .setButtonText("选择文件夹")
-          .onClick(() => {
-            new FolderPickerModal(this.app, this.plugin, async (folder) => {
-              this.plugin.settings.sourceArchiveFolder = folder.path;
-              await this.plugin.saveSettings();
-              this.display();
-            }, "搜索并选择已归档原文目录").open();
-          });
-      });
-
-    new Setting(containerEl)
-      .setName("待归档原文目录")
-      .setDesc("点击完成阅读后，原始 Markdown 会先移到这里，等待批量归档生成导出包。")
-      .addText((text) => {
-        new FolderInputSuggest(this.app, text.inputEl, (folder) => {
-          this.plugin.settings.completedSourceFolder = folder.path;
-          void this.plugin.saveSettings();
-          text.setValue(folder.path);
-        });
-        text
-          .setPlaceholder(DEFAULT_COMPLETED_SOURCE_FOLDER)
-          .setValue(this.plugin.settings.completedSourceFolder)
-          .onChange(async (value) => {
-            this.plugin.settings.completedSourceFolder = normalizePath(value.trim() || DEFAULT_COMPLETED_SOURCE_FOLDER);
-            await this.plugin.saveSettings();
-          });
-      })
-      .addButton((button) => {
-        button
-          .setButtonText("选择文件夹")
-          .onClick(() => {
-            new FolderPickerModal(this.app, this.plugin, async (folder) => {
-              this.plugin.settings.completedSourceFolder = folder.path;
-              await this.plugin.saveSettings();
-              this.display();
-            }, "搜索并选择待归档原文目录").open();
-          });
-      });
-
-    new Setting(containerEl)
-      .setName("移出阅读池目录")
-      .setDesc("没有原路径记录的文件，点击移出阅读池后会放到这里。")
-      .addText((text) => {
-        new FolderInputSuggest(this.app, text.inputEl, (folder) => {
-          this.plugin.settings.removedReadingFolder = folder.path;
-          void this.plugin.saveSettings();
-          text.setValue(folder.path);
-        });
-        text
-          .setPlaceholder(DEFAULT_REMOVED_READING_FOLDER)
-          .setValue(this.plugin.settings.removedReadingFolder)
-          .onChange(async (value) => {
-            this.plugin.settings.removedReadingFolder = normalizePath(value.trim() || DEFAULT_REMOVED_READING_FOLDER);
-            await this.plugin.saveSettings();
-          });
-      })
-      .addButton((button) => {
-        button
-          .setButtonText("选择文件夹")
-          .onClick(() => {
-            new FolderPickerModal(this.app, this.plugin, async (folder) => {
-              this.plugin.settings.removedReadingFolder = folder.path;
-              await this.plugin.saveSettings();
-              this.display();
-            }, "搜索并选择移出阅读池目录").open();
-          });
-      });
-
-    new Setting(containerEl)
-      .setName("二次阅读目录")
-      .setDesc("归档时，仅高亮内容会提取成精炼稿放到这里，并重新进入阅读池。")
-      .addText((text) => {
-        new FolderInputSuggest(this.app, text.inputEl, (folder) => {
-          this.plugin.settings.refinedReadingFolder = folder.path;
-          void this.plugin.saveSettings();
-          text.setValue(folder.path);
-        });
-        text
-          .setPlaceholder(DEFAULT_REFINED_READING_FOLDER)
-          .setValue(this.plugin.settings.refinedReadingFolder)
-          .onChange(async (value) => {
-            this.plugin.settings.refinedReadingFolder = normalizePath(value.trim() || DEFAULT_REFINED_READING_FOLDER);
-            await this.plugin.saveSettings();
-          });
-      })
-      .addButton((button) => {
-        button
-          .setButtonText("选择文件夹")
-          .onClick(() => {
-            new FolderPickerModal(this.app, this.plugin, async (folder) => {
-              this.plugin.settings.refinedReadingFolder = folder.path;
-              await this.plugin.saveSettings();
-              this.display();
-            }, "搜索并选择二次阅读文件夹").open();
-          });
-      });
-
-    new Setting(containerEl)
-      .setName("Codex 提问队列目录")
-      .setDesc("归档时，提问类型会写到这里，不进入 RemNote。")
-      .addText((text) => {
-        new FolderInputSuggest(this.app, text.inputEl, (folder) => {
-          this.plugin.settings.questionQueueFolder = folder.path;
-          void this.plugin.saveSettings();
-          text.setValue(folder.path);
-        });
-        text
-          .setPlaceholder(DEFAULT_QUESTION_QUEUE_FOLDER)
-          .setValue(this.plugin.settings.questionQueueFolder)
-          .onChange(async (value) => {
-            this.plugin.settings.questionQueueFolder = normalizePath(value.trim() || DEFAULT_QUESTION_QUEUE_FOLDER);
-            await this.plugin.saveSettings();
-          });
-      })
-      .addButton((button) => {
-        button
-          .setButtonText("选择文件夹")
-          .onClick(() => {
-            new FolderPickerModal(this.app, this.plugin, async (folder) => {
-              this.plugin.settings.questionQueueFolder = folder.path;
-              await this.plugin.saveSettings();
-              this.display();
-            }, "搜索并选择 Codex 提问队列文件夹").open();
-          });
-      });
-
-    new Setting(containerEl)
-      .setName("链接导入根目录")
-      .setDesc("旧链接导入脚本的兼容目录；新的标准导入固定复用浏览器“导入本地”工作流并写入阅读区/浏览器高亮。")
-      .addText((text) => {
-        new FolderInputSuggest(this.app, text.inputEl, (folder) => {
-          this.plugin.settings.linkImportFolder = folder.path;
-          void this.plugin.saveSettings();
-          text.setValue(folder.path);
-        });
-        text
-          .setPlaceholder(DEFAULT_LINK_IMPORT_FOLDER)
-          .setValue(this.plugin.settings.linkImportFolder)
-          .onChange(async (value) => {
-            this.plugin.settings.linkImportFolder = normalizePath(value.trim() || DEFAULT_LINK_IMPORT_FOLDER);
-            await this.plugin.saveSettings();
-          });
-      })
-      .addButton((button) => {
-        button
-          .setButtonText("选择文件夹")
-          .onClick(() => {
-            new FolderPickerModal(this.app, this.plugin, async (folder) => {
-              this.plugin.settings.linkImportFolder = folder.path;
-              await this.plugin.saveSettings();
-              this.display();
-            }, "搜索并选择链接导入根目录").open();
-          });
-      });
-
-    new Setting(containerEl)
-      .setName("浏览器加工状态目录")
-      .setDesc("浏览器高亮的 Local IR 状态保存在这里；目录位于阅读区外，阅读区只保留可直接阅读的 Markdown。")
-      .addText((text) => {
-        new FolderInputSuggest(this.app, text.inputEl, (folder) => {
-          this.plugin.settings.documentStateFolder = folder.path;
-          void this.plugin.saveSettings();
-          text.setValue(folder.path);
-        });
-        text
-          .setPlaceholder(DEFAULT_DOCUMENT_STATE_FOLDER)
-          .setValue(this.plugin.settings.documentStateFolder)
-          .onChange(async (value) => {
-            this.plugin.settings.documentStateFolder = normalizePath(value.trim() || DEFAULT_DOCUMENT_STATE_FOLDER);
-            await this.plugin.saveSettings();
-          });
-      });
-
-    new Setting(containerEl)
-      .setName("高亮后自动打开评论")
-      .setDesc("开启后，加工模式下选中文本会自动高亮并打开评论结构选择。")
-      .addToggle((toggle) => {
-        toggle
-          .setValue(this.plugin.settings.autoOpenAnnotationModal)
-          .onChange(async (value) => {
-            this.plugin.settings.autoOpenAnnotationModal = value;
-            await this.plugin.saveSettings();
-          });
-      });
-  }
-}
-
-class FolderInputSuggest extends AbstractInputSuggest<TFolder> {
-  app: App;
-  onChoose: (folder: TFolder) => void;
-
-  constructor(app: App, inputEl: HTMLInputElement, onChoose: (folder: TFolder) => void) {
-    super(app, inputEl);
-    this.app = app;
-    this.onChoose = onChoose;
-  }
-
-  getSuggestions(query: string): TFolder[] {
-    const normalizedQuery = normalizePath(query.trim()).toLowerCase();
-    return this.app.vault
-      .getAllLoadedFiles()
-      .filter((file): file is TFolder => file instanceof TFolder)
-      .filter((folder) => !normalizedQuery || folder.path.toLowerCase().includes(normalizedQuery))
-      .sort((a, b) => a.path.localeCompare(b.path))
-      .slice(0, 50);
-  }
-
-  renderSuggestion(folder: TFolder, el: HTMLElement) {
-    el.setText(folder.path || "/");
-  }
-
-  selectSuggestion(folder: TFolder) {
-    this.setValue(folder.path);
-    this.onChoose(folder);
-    this.close();
-  }
-}
-
-class FolderPickerModal extends FuzzySuggestModal<TFolder> {
-  plugin: LocalIncrementalReadingPlugin;
-  onChoose: (folder: TFolder) => Promise<void>;
-  placeholder: string;
-
-  constructor(app: App, plugin: LocalIncrementalReadingPlugin, onChoose: (folder: TFolder) => Promise<void>, placeholder = "搜索并选择阅读池文件夹") {
-    super(app);
-    this.plugin = plugin;
-    this.onChoose = onChoose;
-    this.placeholder = placeholder;
-    this.setPlaceholder(this.placeholder);
-  }
-
-  getItems(): TFolder[] {
-    return this.plugin.getVaultFolders();
-  }
-
-  getItemText(folder: TFolder): string {
-    return folder.path || "/";
-  }
-
-  onChooseItem(folder: TFolder) {
-    void this.onChoose(folder);
-  }
-}
-
-class NumberInputModal extends Modal {
-  title: string;
-  defaultValue: number;
-  onSubmit: (value: number) => Promise<void>;
-
-  constructor(app: App, title: string, defaultValue: number, onSubmit: (value: number) => Promise<void>) {
-    super(app);
-    this.title = title;
-    this.defaultValue = defaultValue;
-    this.onSubmit = onSubmit;
-  }
-
-  onOpen() {
-    const { contentEl } = this;
-    contentEl.empty();
-    contentEl.addClass("local-ir-modal");
-    contentEl.createEl("h2", { text: this.title });
-
-    let value = this.defaultValue;
-    new Setting(contentEl)
-      .setName("天数")
-      .addText((text) => {
-        text
-          .setValue(String(this.defaultValue))
-          .onChange((nextValue) => {
-            value = Math.max(1, Math.round(Number(nextValue) || this.defaultValue));
-          });
-        text.inputEl.addEventListener("keydown", (event) => {
-          if (event.key === "Enter") {
-            event.preventDefault();
-            void this.submit(value);
-          }
-        });
-      });
-
-    new Setting(contentEl)
-      .addButton((button) => {
-        button
-          .setButtonText("取消")
-          .onClick(() => this.close());
-      })
-      .addButton((button) => {
-        button
-          .setButtonText("确认")
-          .setCta()
-          .onClick(() => void this.submit(value));
-      });
-  }
-
-  async submit(value: number) {
-    await this.onSubmit(value);
-    this.close();
-  }
-}
-
-class QaCardModal extends Modal {
-  plugin: LocalIncrementalReadingPlugin;
-  card: QaCardRecord;
-
-  constructor(app: App, plugin: LocalIncrementalReadingPlugin, card: QaCardRecord) {
-    super(app);
-    this.plugin = plugin;
-    this.card = { ...card };
-  }
-
-  onOpen() {
-    const { contentEl } = this;
-    const isFrozen = this.card.archived || this.plugin.isRecordFrozenForExport(this.card.path);
-    contentEl.empty();
-    this.modalEl.addClass("local-ir-wide-modal");
-    contentEl.addClass("local-ir-modal");
-    contentEl.createEl("h2", { text: isFrozen ? "查看问答卡" : "编辑问答卡" });
-    contentEl.createDiv({
-      cls: "local-ir-muted",
-      text: isFrozen ? "导出输入已冻结或已正式归档；当前只读。" : "生成导出包前可以修改问题和答案；未解析卡片会阻止 package commit。"
-    });
-
-    const grid = contentEl.createDiv({ cls: "local-ir-processing-grid local-ir-qa-edit-grid" });
-    const questionColumn = grid.createDiv({ cls: "local-ir-processing-column" });
-    questionColumn.createEl("h3", { text: "问题" });
-    const questionInput = questionColumn.createEl("textarea");
-    questionInput.value = this.card.questionMarkdown;
-    questionInput.disabled = isFrozen;
-
-    const answerColumn = grid.createDiv({ cls: "local-ir-processing-column" });
-    answerColumn.createEl("h3", { text: "答案" });
-    const answerInput = answerColumn.createEl("textarea");
-    answerInput.value = this.card.answerMarkdown;
-    answerInput.placeholder = "留空时，归档后的 qa:resolve 会基于文章生成答案。";
-    answerInput.disabled = isFrozen;
-
-    const previewColumn = grid.createDiv({ cls: "local-ir-processing-column" });
-    previewColumn.createEl("h3", { text: "RemNote 多行卡预览" });
-    const preview = previewColumn.createEl("pre", { cls: "local-ir-qa-modal-preview" });
-    const updatePreview = () => {
-      preview.setText(renderRemNoteMultiLineCard(questionInput.value || "待生成问题", answerInput.value || this.card.answerSourceText || "待生成答案"));
-    };
-    updatePreview();
-    questionInput.addEventListener("input", updatePreview);
-    answerInput.addEventListener("input", updatePreview);
-
-    const optionRow = contentEl.createDiv({ cls: "local-ir-toolbar" });
-    const generateLabel = optionRow.createEl("label", { cls: "local-ir-toggle" });
-    const generateInput = generateLabel.createEl("input", { type: "checkbox" });
-    generateInput.checked = this.card.needsAnswerGeneration || !this.card.answerMarkdown.trim();
-    generateInput.disabled = isFrozen;
-    generateLabel.createSpan({ text: "导入前用 AI 生成/补全答案" });
-
-    const buttons = contentEl.createDiv({ cls: "local-ir-modal-buttons" });
-    this.modalButton(buttons, "关闭", () => this.close());
-    if (!isFrozen) {
-      this.modalButton(buttons, "保存", () => {
-        void this.plugin.updateQaCard({
-          ...this.card,
-          questionMarkdown: questionInput.value,
-          answerMarkdown: answerInput.value,
-          needsAnswerGeneration: generateInput.checked
-        }).then((saved) => {
-          if (saved) this.close();
-        });
-      }, true);
-    }
-  }
-
-  modalButton(container: HTMLElement, label: string, onClick: () => void, primary = false) {
-    const button = container.createEl("button", {
-      text: label,
-      cls: primary ? "mod-cta" : ""
-    });
-    button.addEventListener("click", onClick);
-  }
-}
-
-class AnnotationModal extends Modal {
-  plugin: LocalIncrementalReadingPlugin;
-  annotation: AnnotationRecord;
-  flushDraftSave: (() => Promise<void>) | null = null;
-
-  constructor(app: App, plugin: LocalIncrementalReadingPlugin, annotation: AnnotationRecord) {
-    super(app);
-    this.plugin = plugin;
-    this.annotation = { ...annotation };
-  }
-
-  onOpen() {
-    const { contentEl } = this;
-    this.modalEl.addClass("local-ir-wide-modal");
-    contentEl.empty();
-    contentEl.addClass("local-ir-modal");
-    contentEl.createEl("h2", { text: this.annotation.markKind === "cloze" ? "挖空加工" : "高亮加工" });
-
-    let type = this.annotation.type === "highlight" ? "comment" as AnnotationType : normalizeModalAnnotationType(this.annotation.type);
-    let currentText = this.annotation.currentText || this.annotation.selectedText;
-    let commentMarkdown = this.annotation.commentMarkdown;
-    let rewriteMarkdown = this.annotation.rewriteMarkdown || "";
-    let draftTimer: number | null = null;
-
-    const topBar = contentEl.createDiv({ cls: "local-ir-modal-topbar" });
-    const typeGroup = topBar.createDiv({ cls: "local-ir-field local-ir-type-field" });
-    typeGroup.createEl("label", { text: "加工类型" });
-    const typeButtons = typeGroup.createDiv({ cls: "local-ir-type-buttons" });
-    const typeButtonMap: Partial<Record<AnnotationType, HTMLButtonElement>> = {};
-    const saveStatus = topBar.createDiv({ cls: "local-ir-modal-meta" });
-
-    const saveDraftNow = async () => {
-      if (draftTimer !== null) {
-        window.clearTimeout(draftTimer);
-        draftTimer = null;
-      }
-      await this.plugin.saveAnnotationDraft({
-          ...this.annotation,
-          type,
-          commentMarkdown,
-          rewriteMarkdown
-      });
-      saveStatus.setText(`${this.annotation.sourceFormat === "legacy" ? "旧高亮，首次保存时绑定" : "已自动保存"} · ${this.annotation.orphaned ? "孤立记录" : "已绑定"}`);
-    };
-    this.flushDraftSave = saveDraftNow;
-
-    const scheduleDraftSave = () => {
-      if (draftTimer !== null) window.clearTimeout(draftTimer);
-      saveStatus.setText("保存中...");
-      draftTimer = window.setTimeout(() => {
-        void saveDraftNow();
-      }, 700);
-    };
-
-    const renderTypeButtons = () => {
-      for (const [value, button] of Object.entries(typeButtonMap) as Array<[AnnotationType, HTMLButtonElement]>) {
-        button.toggleClass("is-active", value === type);
-      }
-    };
-
-    for (const value of ANNOTATION_MODAL_TYPES) {
-      const button = typeButtons.createEl("button", {
-        text: ANNOTATION_LABELS[value],
-        cls: "local-ir-type-button"
-      });
-      typeButtonMap[value] = button;
-      button.addEventListener("click", () => {
-        const nextType = normalizeModalAnnotationType(value);
-        if (!commentMarkdown.trim() || commentMarkdown === annotationTemplate(type)) {
-          commentMarkdown = annotationTemplate(nextType);
-          commentInput.value = commentMarkdown;
-        }
-        type = nextType;
-        renderTypeButtons();
-        scheduleDraftSave();
-      });
-    }
-    renderTypeButtons();
-
-    saveStatus.setText(`${this.annotation.sourceFormat === "legacy" ? "旧高亮，首次保存时绑定" : "已自动保存"} · ${this.annotation.orphaned ? "孤立记录" : "已绑定"}`);
-
-    const grid = contentEl.createDiv({ cls: "local-ir-processing-grid" });
-    const sourceColumn = grid.createDiv({ cls: "local-ir-processing-column" });
-    sourceColumn.createEl("h3", { text: "当前高亮文本" });
-    sourceColumn.createDiv({
-      cls: "local-ir-muted",
-      text: "保存后会同步修改 Markdown 中对应高亮块内部文本。"
-    });
-    const currentInput = sourceColumn.createEl("textarea");
-    currentInput.value = currentText;
-    currentInput.addEventListener("input", () => {
-      currentText = currentInput.value;
-    });
-
-    const commentColumn = grid.createDiv({ cls: "local-ir-processing-column" });
-    commentColumn.createEl("h3", { text: "评论/结构化加工" });
-    commentColumn.createDiv({
-      cls: "local-ir-muted",
-      text: "只保存在插件数据里，不写入原文。"
-    });
-    const commentInput = commentColumn.createEl("textarea");
-    commentInput.placeholder = annotationTemplate(type);
-    commentInput.value = commentMarkdown;
-    commentInput.addEventListener("input", () => {
-      commentMarkdown = commentInput.value;
-      scheduleDraftSave();
-    });
-
-    const rewriteColumn = grid.createDiv({ cls: "local-ir-processing-column" });
-    rewriteColumn.createEl("h3", { text: "改写稿" });
-    rewriteColumn.createDiv({
-      cls: "local-ir-muted",
-      text: "默认只保存；点击替换按钮才改原文高亮文本。"
-    });
-    const rewriteInput = rewriteColumn.createEl("textarea");
-    rewriteInput.placeholder = "把这段材料改写成你自己的表述，或补充新的观点。";
-    rewriteInput.value = rewriteMarkdown;
-    rewriteInput.addEventListener("input", () => {
-      rewriteMarkdown = rewriteInput.value;
-      scheduleDraftSave();
-    });
-
-    const buttonRow = contentEl.createDiv({ cls: "local-ir-modal-buttons" });
-    this.modalButton(buttonRow, "关闭", () => {
-      void saveDraftNow().then(() => this.close());
-    });
-    this.modalButton(buttonRow, "删除记录", () => {
-      void this.plugin.deleteAnnotation(this.annotation.id).then(() => this.close());
-    });
-    this.modalButton(buttonRow, "绑定到当前选区", () => {
-      void this.plugin.rebindAnnotationToSelection({
-        ...this.annotation,
-        type,
-        currentText,
-        selectedText: currentText,
-        commentMarkdown,
-        rewriteMarkdown
-      }).then(() => this.close());
-    });
-    this.modalButton(buttonRow, "用改写稿替换高亮文本", () => {
-      const rewrite = rewriteMarkdown.trim();
-      if (!rewrite) {
-        new Notice("改写稿为空。");
-        return;
-      }
-      currentText = rewrite;
-      currentInput.value = currentText;
-      void this.plugin.updateAnnotation({
-        ...this.annotation,
-        type,
-        currentText,
-        selectedText: currentText,
-        commentMarkdown,
-        rewriteMarkdown
-      }, { applyRewrite: true }).then(() => this.close());
-    });
-    this.modalButton(buttonRow, "保存并关闭", () => {
-      void this.plugin.updateAnnotation({
-        ...this.annotation,
-        type,
-        currentText,
-        selectedText: currentText,
-        commentMarkdown,
-        rewriteMarkdown
-      }).then(() => this.close());
-    }, true);
-  }
-
-  modalButton(container: HTMLElement, label: string, onClick: () => void, primary = false) {
-    const button = container.createEl("button", {
-      text: label,
-      cls: primary ? "mod-cta" : ""
-    });
-    button.addEventListener("click", onClick);
-  }
-
-  onClose() {
-    if (this.flushDraftSave) void this.flushDraftSave();
-  }
-}
-
-function getNormalizedSelection(editor: Editor): EditorSelection | null {
-  const from = editor.getCursor("from");
-  const to = editor.getCursor("to");
-  const text = editor.getRange(from, to);
-  if (!text.trim()) return null;
-  return {
-    from,
-    to,
-    fromOffset: editor.posToOffset(from),
-    toOffset: editor.posToOffset(to),
-    text
-  };
-}
-
-function createWrappedHighlightText(id: string, selectedText: string, markKind: AnnotationMarkKind = "highlight"): { wrappedText: string; fragments: AnnotationFragment[] } {
-  const protectedRanges = findProtectedMarkdownRanges(selectedText);
-  const parts: { text: string; protect: boolean }[] = [];
-  let cursor = 0;
-  for (const range of protectedRanges) {
-    if (range.start > cursor) parts.push({ text: selectedText.slice(cursor, range.start), protect: false });
-    parts.push({ text: selectedText.slice(range.start, range.end), protect: true });
-    cursor = range.end;
-  }
-  if (cursor < selectedText.length) parts.push({ text: selectedText.slice(cursor), protect: false });
-  if (parts.length === 0) parts.push({ text: selectedText, protect: false });
-
-  const fragments: AnnotationFragment[] = [];
-  const kindAttr = markKind === "cloze" ? ' data-ir-kind="cloze"' : "";
-  const wrappedParts = parts.flatMap((part) => {
-    if (!part.text) return [part.text];
-    if (part.protect) return [part.text];
-    return part.text.split(/(\r?\n[ \t]*\r?\n+)/g).map((chunk) => {
-      if (!chunk) return chunk;
-      if (/^\r?\n[ \t]*\r?\n+$/.test(chunk)) return chunk;
-      if (!chunk.trim()) return chunk;
-      const index = fragments.length;
-      fragments.push({ index, text: chunk });
-      return `<mark data-ir-id="${id}" data-ir-fragment="${index}"${kindAttr}>${chunk}</mark>`;
-    });
-  });
-
-  if (fragments.length === 0) {
-    fragments.push({ index: 0, text: selectedText });
-    return {
-      wrappedText: selectedText,
-      fragments
-    };
-  }
-
-  return {
-    wrappedText: wrappedParts.join(""),
-    fragments
-  };
-}
-
-function findProtectedMarkdownRanges(text: string): TextRange[] {
-  return findProtectedMarkdownRangesInContent(text).map((range) => ({ start: range.start, end: range.end }));
-}
-
-function findProtectedMarkdownRangesInContent(text: string): ProtectedRange[] {
-  const ranges: ProtectedRange[] = [];
-  const addMatches = (regex: RegExp) => {
-    let match: RegExpExecArray | null;
-    while ((match = regex.exec(text)) !== null) {
-      ranges.push({ start: match.index, end: match.index + match[0].length, kind: detectProtectedMatchKind(match[0]) });
-      if (match[0].length === 0) regex.lastIndex += 1;
-    }
-  };
-
-  addMatches(/```[\s\S]*?```/g);
-  addMatches(/~~~[\s\S]*?~~~/g);
-  addMatches(/\$\$[\s\S]*?\$\$/g);
-  addMatches(/<style\b[\s\S]*?<\/style>/gi);
-  addMatches(/<script\b[\s\S]*?<\/script>/gi);
-  addMatches(/`+[\s\S]*?`+/g);
-  addMatches(/!\[\[[\s\S]*?\]\]/g);
-  addMatches(/\[\[[\s\S]*?\]\]/g);
-  addMatches(/!\[[^\]]*?\]\([^)\n]+?\)/g);
-  addMatches(/\[[^\]]+?\]\([^)\n]+?\)/g);
-  addMatches(/\[[^\]]+?\]\[[^\]\n]*?\]/g);
-  addMatches(/\$[^$\n]+?\$/g);
-  ranges.push(...findHtmlBlockRanges(text));
-
-  return mergeProtectedRanges(ranges, text.length);
-}
-
-function detectProtectedMatchKind(value: string): ProtectedKind {
-  if (/^```|^~~~/m.test(value)) return "code_fence";
-  if (/^\$\$/.test(value)) return "math_block";
-  if (/^!\[|^!\[\[/i.test(value)) return "image";
-  if (/^\[|\[\[/.test(value)) return "link";
-  if (/^<style/i.test(value)) return "style_block";
-  if (/^<script/i.test(value)) return "html_block";
-  if (/^`/.test(value)) return "code_fence";
-  if (/^\$/.test(value)) return "math_block";
-  return "mixed";
-}
-
-function findHtmlBlockRanges(content: string): ProtectedRange[] {
-  const lines = getMarkdownLines(content);
-  const ranges: ProtectedRange[] = [];
-  const blockTag = /<\/?(div|section|article|table|thead|tbody|tr|td|th|style|script|iframe|details|summary|ul|ol|li|p|h[1-6]|span)\b[^>]*>/gi;
-  for (let index = 0; index < lines.length; index += 1) {
-    const line = lines[index];
-    if (!/^\s*<([a-z][\w-]*)(\s|>|$)/i.test(line.text)) continue;
-    const firstTag = /^\s*<([a-z][\w-]*)/i.exec(line.text);
-    const tag = firstTag?.[1]?.toLowerCase();
-    if (!tag || tag === "mark") continue;
-    let depth = 0;
-    let endIndex = index;
-    for (let cursor = index; cursor < lines.length; cursor += 1) {
-      const text = lines[cursor].text;
-      let match: RegExpExecArray | null;
-      blockTag.lastIndex = 0;
-      while ((match = blockTag.exec(text)) !== null) {
-        const token = match[0];
-        const tokenTag = match[1].toLowerCase();
-        if (tokenTag !== tag) continue;
-        if (/^<\//.test(token)) depth -= 1;
-        else if (!/\/>$/.test(token)) depth += 1;
-      }
-      endIndex = cursor;
-      if (depth <= 0 && cursor > index) break;
-      if (cursor > index && !text.trim()) break;
-    }
-    if (endIndex > index) {
-      ranges.push({ start: line.start, end: lines[endIndex].breakEnd, kind: tag === "style" ? "style_block" : "html_block" });
-      index = endIndex;
-    }
-  }
-  return ranges;
-}
-
-function mergeTextRanges(ranges: TextRange[], maxEnd: number): TextRange[] {
-  const sorted = ranges
-    .map((range) => ({ start: clampRangeIndex(range.start, maxEnd), end: clampRangeIndex(range.end, maxEnd) }))
-    .filter((range) => range.end > range.start)
-    .sort((a, b) => a.start - b.start || a.end - b.end);
-  const merged: TextRange[] = [];
-  for (const range of sorted) {
-    const last = merged[merged.length - 1];
-    if (last && range.start <= last.end) {
-      last.end = Math.max(last.end, range.end);
-    } else {
-      merged.push({ ...range });
-    }
-  }
-  return merged;
-}
-
-function mergeProtectedRanges(ranges: ProtectedRange[], maxEnd: number): ProtectedRange[] {
-  const sorted = ranges
-    .map((range) => ({ start: clampRangeIndex(range.start, maxEnd), end: clampRangeIndex(range.end, maxEnd), kind: range.kind }))
-    .filter((range) => range.end > range.start)
-    .sort((a, b) => a.start - b.start || a.end - b.end);
-  const merged: ProtectedRange[] = [];
-  for (const range of sorted) {
-    const last = merged[merged.length - 1];
-    if (last && range.start <= last.end) {
-      last.end = Math.max(last.end, range.end);
-      if (last.kind !== range.kind) last.kind = "mixed";
-    } else {
-      merged.push({ ...range });
-    }
-  }
-  return merged;
-}
-
-function detectProtectedKindForSelection(content: string, fromOffset: number, toOffset: number, selectedText: string): ProtectedKind | null {
-  const ranges = findProtectedMarkdownRangesInContent(content).filter((range) => rangesOverlap(range, { start: fromOffset, end: toOffset }));
-  const directKinds: ProtectedKind[] = [];
-  if (/```|~~~/.test(selectedText)) directKinds.push("code_fence");
-  if (/<style\b|<\/style>/i.test(selectedText)) directKinds.push("style_block");
-  if (/<[a-z][\w-]*\b[^>]*>|<\/[a-z][\w-]*>/i.test(selectedText)) directKinds.push("html_block");
-  if (/\$\$[\s\S]*?\$\$/.test(selectedText)) directKinds.push("math_block");
-  if (/!\[[^\]]*?\]\([^)\n]+?\)|!\[\[[\s\S]*?\]\]/.test(selectedText)) directKinds.push("image");
-  if (/\[[^\]]+?\]\([^)\n]+?\)|\[\[[\s\S]*?\]\]/.test(selectedText)) directKinds.push("link");
-  const kinds = [...ranges.map((range) => range.kind), ...directKinds].filter(Boolean);
-  if (kinds.length === 0) return null;
-  const unique = kinds.filter((kind, index, array) => array.indexOf(kind) === index);
-  return unique.length === 1 ? unique[0] : "mixed";
-}
-
-function getLineRangeForOffsets(content: string, fromOffset: number, toOffset: number): LineRange {
-  const lines = getMarkdownLines(content);
-  const startLine = lines.find((line) => fromOffset >= line.start && fromOffset <= line.breakEnd)?.index ?? 0;
-  const endLine = lines.find((line) => toOffset >= line.start && toOffset <= line.breakEnd)?.index ?? startLine;
-  return { startLine, endLine };
-}
-
-function clampRangeIndex(value: number, maxEnd: number): number {
-  return Math.max(0, Math.min(maxEnd, Math.round(Number(value) || 0)));
-}
-
-function createAnnotationAnchor(
-  content: string,
-  fromOffset: number,
-  toOffset: number,
-  selectedText: string,
-  fragments: AnnotationFragment[]
-): AnnotationAnchor {
-  return {
-    sectionPath: getSectionPathAtOffset(content, fromOffset),
-    paragraphIndex: getParagraphIndexAtOffset(content, fromOffset),
-    sourceOffset: fromOffset,
-    contextBefore: stripIrMarkup(content.slice(Math.max(0, fromOffset - 120), fromOffset)).trim(),
-    contextAfter: stripIrMarkup(content.slice(toOffset, Math.min(content.length, toOffset + 120))).trim(),
-    contextHash: shortHash(`${selectedText}\n${fromOffset}\n${toOffset}`),
-    fragmentCount: Math.max(1, fragments.length),
-    crossedBlankLines: /\r?\n[ \t]*\r?\n/.test(selectedText)
-  };
-}
-
-function createSelectionHierarchy(text: string): HierarchyContext {
-  return {
-    scope: "selection",
-    headingPath: [],
-    expandedText: stripIrMarkup(text).trim(),
-    expandedAnswerText: stripIrMarkup(text).trim(),
-    subtreeRange: null
-  };
-}
-
-function resolveSelectionHierarchy(content: string, fromOffset: number, toOffset: number, selectedText: string): HierarchyContext {
-  const lines = getMarkdownLines(content);
-  const line = lines.find((item) => fromOffset >= item.start && fromOffset <= item.breakEnd);
-  if (!line) return createSelectionHierarchy(selectedText);
-
-  const heading = parseHeadingLine(line.text);
-  if (heading && selectionMatchesNodeText(selectedText, heading.title, line, fromOffset, toOffset)) {
-    return createHeadingHierarchy(content, lines, line.index, heading.level, heading.title);
-  }
-
-  const listItem = parseListLine(line.text);
-  if (listItem && selectionMatchesNodeText(selectedText, listItem.text, line, fromOffset, toOffset)) {
-    return createListHierarchy(content, lines, line.index, listItem.indent, listItem.text);
-  }
-
-  return createSelectionHierarchy(selectedText);
-}
-
-function resolveAnnotationHierarchy(content: string, annotation: AnnotationRecord): HierarchyContext {
-  const markRange = annotation.sourceFormat === "mark" ? findFirstMarkRangeById(content, annotation.id) : null;
-  const virtualRange = annotation.renderMode === "virtual_decoration" ? annotation.range : null;
-  const sourceOffset = markRange?.start ?? virtualRange?.start ?? annotation.sourceOffset ?? annotation.anchor?.sourceOffset ?? null;
-  if (typeof sourceOffset === "number") {
-    const selected = annotation.currentText || annotation.selectedText || annotation.originalText;
-    return resolveSelectionHierarchy(content, sourceOffset, markRange?.end ?? virtualRange?.end ?? sourceOffset + selected.length, selected);
-  }
-  if (annotation.scope !== "selection" && annotation.expandedText.trim()) {
-    return {
-      scope: annotation.scope,
-      headingPath: annotation.headingPath,
-      expandedText: annotation.expandedText,
-      expandedAnswerText: annotation.expandedAnswerText || annotation.expandedText,
-      subtreeRange: annotation.subtreeRange
-    };
-  }
-  return createSelectionHierarchy(annotation.currentText || annotation.selectedText || annotation.originalText);
-}
-
-function getMarkdownLines(content: string): MarkdownLine[] {
-  const lines: MarkdownLine[] = [];
-  const regex = /.*(?:\r?\n|$)/g;
-  let match: RegExpExecArray | null;
-  let index = 0;
-  while ((match = regex.exec(content)) !== null) {
-    const raw = match[0];
-    if (!raw && match.index === content.length) break;
-    const text = raw.replace(/\r?\n$/, "");
-    lines.push({
-      index,
-      text,
-      start: match.index,
-      end: match.index + text.length,
-      breakEnd: match.index + raw.length
-    });
-    index += 1;
-  }
-  return lines;
-}
-
-function parseHeadingLine(line: string): { level: number; title: string } | null {
-  const match = /^(#{1,6})\s+(.+?)\s*$/.exec(stripIrMarkup(line));
-  if (!match) return null;
-  return {
-    level: match[1].length,
-    title: stripIrMarkup(match[2]).replace(/\s+#+$/, "").trim()
-  };
-}
-
-function parseListLine(line: string): { indent: number; text: string } | null {
-  const match = /^([ \t]*)(?:[-*+]|\d+[.)])\s+(.+?)\s*$/.exec(stripIrMarkup(line));
-  if (!match) return null;
-  return {
-    indent: countIndent(match[1]),
-    text: stripIrMarkup(match[2]).trim()
-  };
-}
-
-function selectionMatchesNodeText(selectedText: string, nodeText: string, line: MarkdownLine, fromOffset: number, toOffset: number): boolean {
-  const selected = normalizeComparableText(selectedText);
-  const node = normalizeComparableText(nodeText);
-  if (!selected || !node) return false;
-  if (selected === node) return true;
-
-  const firstNonWhitespace = line.text.search(/\S/);
-  const trimmedLineStart = line.start + (firstNonWhitespace < 0 ? 0 : firstNonWhitespace);
-  const trimmedLineEnd = line.start + line.text.trimEnd().length;
-  const coversWholeLine = fromOffset <= trimmedLineStart && toOffset >= trimmedLineEnd;
-  return coversWholeLine && normalizeComparableText(line.text).includes(node);
-}
-
-function createHeadingHierarchy(content: string, lines: MarkdownLine[], lineIndex: number, level: number, title: string): HierarchyContext {
-  let end = content.length;
-  for (let index = lineIndex + 1; index < lines.length; index += 1) {
-    const heading = parseHeadingLine(lines[index].text);
-    if (heading && heading.level <= level) {
-      end = lines[index].start;
-      break;
-    }
-  }
-  const line = lines[lineIndex];
-  const expandedText = stripIrMarkup(content.slice(line.start, end)).trim();
-  const expandedAnswerText = stripIrMarkup(content.slice(line.breakEnd, end)).trim();
-  return {
-    scope: expandedAnswerText ? "heading_subtree" : "selection",
-    headingPath: getHeadingPathForLine(lines, lineIndex),
-    expandedText: expandedText || title,
-    expandedAnswerText: expandedAnswerText || title,
-    subtreeRange: expandedAnswerText ? { start: line.start, end } : null
-  };
-}
-
-function createListHierarchy(content: string, lines: MarkdownLine[], lineIndex: number, indent: number, text: string): HierarchyContext {
-  let end = lines[lineIndex].breakEnd;
-  for (let index = lineIndex + 1; index < lines.length; index += 1) {
-    const line = lines[index];
-    if (!line.text.trim()) {
-      end = line.breakEnd;
-      continue;
-    }
-    const nextList = parseListLine(line.text);
-    const nextIndent = nextList ? nextList.indent : countIndent((/^([ \t]*)/.exec(line.text)?.[1]) || "");
-    if (nextIndent <= indent) break;
-    end = line.breakEnd;
-  }
-  const line = lines[lineIndex];
-  const expandedText = stripIrMarkup(content.slice(line.start, end)).trim();
-  const expandedAnswerText = stripIrMarkup(content.slice(line.breakEnd, end)).trim();
-  return {
-    scope: expandedAnswerText ? "list_subtree" : "selection",
-    headingPath: getHeadingPathForLine(lines, lineIndex),
-    expandedText: expandedText || text,
-    expandedAnswerText: expandedAnswerText || text,
-    subtreeRange: expandedAnswerText ? { start: line.start, end } : null
-  };
-}
-
-function getHeadingPathForLine(lines: MarkdownLine[], lineIndex: number): string[] {
-  const path: string[] = [];
-  for (let index = 0; index <= lineIndex; index += 1) {
-    const heading = parseHeadingLine(lines[index].text);
-    if (!heading) continue;
-    path.splice(heading.level - 1);
-    path[heading.level - 1] = heading.title;
-  }
-  return path.filter(Boolean);
-}
-
-function countIndent(value: string): number {
-  return value.replace(/\t/g, "    ").length;
-}
-
-function getSectionPathAtOffset(content: string, offset: number): string[] {
-  const path: string[] = [];
-  const lines = content.slice(0, Math.max(0, offset)).split(/\r?\n/);
-  for (const line of lines) {
-    const match = /^(#{1,6})\s+(.+?)\s*$/.exec(line);
-    if (!match) continue;
-    const level = match[1].length;
-    path.splice(level - 1);
-    path[level - 1] = match[2];
-  }
-  return path.filter(Boolean);
-}
-
-function getParagraphIndexAtOffset(content: string, offset: number): number | null {
-  const paragraphs = extractParagraphs(content, 0, false);
-  const found = paragraphs.find((paragraph) => offset >= paragraph.start && offset <= paragraph.end);
-  return found?.index ?? null;
-}
-
-function resolveBilingualMatch(content: string | null, annotation: AnnotationRecord): BilingualMatch {
-  const empty = createEmptyBilingualMatch(annotation.currentText || annotation.selectedText);
-  if (!content) return empty;
-
-  const sections = detectBilingualSections(content);
-  if (!sections.zh || !sections.en) return empty;
-
-  const zhParagraphs = extractParagraphs(sections.zh.text, sections.zh.start, false);
-  const enParagraphs = extractParagraphs(sections.en.text, sections.en.start, true);
-  if (zhParagraphs.length === 0 || enParagraphs.length === 0) return empty;
-
-  const markRange = findFirstMarkRangeById(content, annotation.id);
-  const offset = markRange?.start ?? annotation.range?.start ?? annotation.anchor?.sourceOffset ?? annotation.sourceOffset;
-  const zhIndex = findChineseParagraphIndex(zhParagraphs, annotation, offset);
-  if (zhIndex === null) {
-    return {
-      ...empty,
-      detected: true,
-      strategy: "section-detected-no-anchor",
-      warning: "检测到双语章节，但无法稳定定位中文段落。",
-      needsApiResolution: true
-    };
-  }
-
-  const chineseText = stripIrMarkup(zhParagraphs[zhIndex]?.text || annotation.currentText || annotation.selectedText);
-  if (zhParagraphs.length === enParagraphs.length) {
-    const english = enParagraphs[zhIndex]?.text || "";
-    return {
-      detected: true,
-      strategy: "paragraph-index-exact",
-      confidence: "high",
-      chineseText,
-      englishText: english,
-      chineseParagraphIndex: zhIndex,
-      englishParagraphIndex: zhIndex,
-      candidates: english ? [{ index: zhIndex, text: english, score: 1 }] : [],
-      warning: null,
-      needsApiResolution: false
-    };
-  }
-
-  const estimated = zhParagraphs.length > 1
-    ? Math.round((zhIndex / (zhParagraphs.length - 1)) * Math.max(0, enParagraphs.length - 1))
-    : 0;
-  const candidates = enParagraphs
-    .map((paragraph) => ({
-      index: paragraph.index,
-      text: paragraph.text,
-      score: Math.max(0, 1 - Math.abs(paragraph.index - estimated) / Math.max(6, enParagraphs.length))
-    }))
-    .sort((a, b) => b.score - a.score)
-    .slice(0, 8);
-
-  return {
-    detected: true,
-    strategy: "paragraph-index-normalized-window",
-    confidence: "low",
-    chineseText,
-    englishText: "",
-    chineseParagraphIndex: zhIndex,
-    englishParagraphIndex: null,
-    candidates,
-    warning: "中英文段落数不一致，已生成候选，需要 API 语义对齐后再使用。",
-    needsApiResolution: true
-  };
-}
-
-function createEmptyBilingualMatch(text: string): BilingualMatch {
-  return {
-    detected: false,
-    strategy: "none",
-    confidence: "none",
-    chineseText: text,
-    englishText: "",
-    chineseParagraphIndex: null,
-    englishParagraphIndex: null,
-    candidates: [],
-    warning: null,
-    needsApiResolution: false
-  };
-}
-
-function detectBilingualSections(content: string): BilingualSections {
-  const headings = extractMarkdownHeadingsLinear(content);
-
-  const sectionFor = (predicate: (title: string) => boolean) => {
-    const headingIndex = headings.findIndex((heading) => predicate(heading.title));
-    if (headingIndex < 0) return null;
-    const heading = headings[headingIndex];
-    const next = headings[headingIndex + 1];
-    const start = content.indexOf("\n", heading.end);
-    const sectionStart = start >= 0 ? start + 1 : heading.end;
-    const sectionEnd = next?.start ?? content.length;
-    return {
-      title: heading.title,
-      text: content.slice(sectionStart, sectionEnd),
-      start: sectionStart,
-      end: sectionEnd
-    };
-  };
-
-  return {
-    zh: sectionFor((title) => /中文|Chinese/i.test(title) && !/English|英文/i.test(title)),
-    en: sectionFor((title) => /English|英文/i.test(title))
-  };
-}
-
-function extractParagraphs(text: string, baseOffset: number, filterEnglishTimestamps: boolean): TextParagraph[] {
-  return extractParagraphsLinear(text, baseOffset, filterEnglishTimestamps, stripIrMarkup) as TextParagraph[];
-}
-
-function findChineseParagraphIndex(paragraphs: TextParagraph[], annotation: AnnotationRecord, offset: number | null | undefined): number | null {
-  if (typeof offset === "number") {
-    const byOffset = paragraphs.find((paragraph) => offset >= paragraph.start && offset <= paragraph.end);
-    if (byOffset) return byOffset.index;
-  }
-
-  const needle = normalizeComparableText(annotation.currentText || annotation.selectedText || annotation.originalText);
-  if (!needle) return null;
-  const byText = paragraphs.find((paragraph) => normalizeComparableText(paragraph.text).includes(needle.slice(0, 80)));
-  return byText?.index ?? null;
-}
-
-function findFirstMarkRangeById(content: string, id: string): { start: number; end: number } | null {
-  const regex = createMarkRegex(id, true);
-  const match = regex.exec(content);
-  if (!match) return null;
-  return {
-    start: match.index,
-    end: match.index + match[0].length
-  };
-}
-
-function stripIrMarkup(value: string): string {
-  return value
-    .replace(/<mark\b[^>]*>/gi, "")
-    .replace(/<\/mark>/gi, "")
-    .replace(/==([\s\S]*?)==/g, "$1")
-    .replace(/\r\n/g, "\n");
-}
-
-function normalizeComparableText(value: string): string {
-  return stripIrMarkup(value).replace(/\s+/g, "");
-}
-
-function replaceMarkedText(content: string, id: string, nextText: string): string {
-  const range = findMarkedTextRange(content, id);
-  if (!range) return content;
-  const existing = content.slice(range.start, range.end);
-  const markKind = existing.includes('data-ir-kind="cloze"') ? "cloze" : "highlight";
-  const wrapped = createWrappedHighlightText(id, nextText, markKind).wrappedText;
-  return `${content.slice(0, range.start)}${wrapped}${content.slice(range.end)}`;
-}
-
-function findMarkedTextRange(content: string, id: string): { start: number; end: number } | null {
-  const regex = createMarkRegex(id, true);
-  const matches = Array.from(content.matchAll(regex));
-  if (matches.length === 0) return null;
-  const first = matches[0];
-  const last = matches[matches.length - 1];
-  const start = first.index ?? 0;
-  const end = (last.index ?? 0) + last[0].length;
-  return { start, end };
-}
-
-function createMarkRegex(id: string, global: boolean): RegExp {
-  return new RegExp(`<mark\\b(?=[^>]*data-ir-id="${escapeRegExp(id)}")[^>]*>[\\s\\S]*?<\\/mark>`, global ? "g" : "");
-}
-
-interface MarkRange extends TextRange {
-  id: string;
-  fullText: string;
-  innerText: string;
-  markKind: AnnotationMarkKind;
-}
-
-interface RepairedMarkGroup {
-  id: string;
-  markKind: AnnotationMarkKind;
-  protectedKind: ProtectedKind;
-  ranges: TextRange[];
-}
-
-function findAllMarkRanges(content: string): MarkRange[] {
-  const ranges: MarkRange[] = [];
-  const regex = /<mark\b([^>]*)>([\s\S]*?)<\/mark>/gi;
-  let match: RegExpExecArray | null;
-  while ((match = regex.exec(content)) !== null) {
-    const attrs = match[1] || "";
-    const idMatch = /data-ir-id="([^"]+)"/.exec(attrs);
-    if (!idMatch?.[1]) continue;
-    ranges.push({
-      id: idMatch[1],
-      start: match.index,
-      end: match.index + match[0].length,
-      fullText: match[0],
-      innerText: match[2] || "",
-      markKind: attrs.includes('data-ir-kind="cloze"') ? "cloze" : "highlight"
-    });
-  }
-  return ranges;
-}
-
-function isDangerousMarkedRange(range: MarkRange, content: string): boolean {
-  const protectedKind = detectProtectedKindForSelection(content, range.start, range.end, range.innerText);
-  if (protectedKind) return true;
-  return /<style\b|<\/style>|<script\b|<\/script>|^\s*<[a-z][\w-]*\b|```|~~~|\$\$/im.test(range.innerText);
-}
-
-function stripMarkedRangesAndTrack(content: string, ranges: MarkRange[]): { nextContent: string; groups: RepairedMarkGroup[] } {
-  const sorted = [...ranges].sort((a, b) => a.start - b.start || a.end - b.end);
-  const fragmentsById = new Map<string, RepairedMarkGroup>();
-  let cursor = 0;
-  let output = "";
-  for (const range of sorted) {
-    if (range.start < cursor) continue;
-    output += content.slice(cursor, range.start);
-    const start = output.length;
-    output += range.innerText;
-    const end = output.length;
-    const protectedKind = detectProtectedKindForSelection(output, start, end, range.innerText) || detectProtectedMatchKind(range.innerText);
-    const existing = fragmentsById.get(range.id);
-    if (existing) {
-      existing.ranges.push({ start, end });
-      if (existing.protectedKind !== protectedKind) existing.protectedKind = "mixed";
-    } else {
-      fragmentsById.set(range.id, {
-        id: range.id,
-        markKind: range.markKind,
-        protectedKind,
-        ranges: [{ start, end }]
-      });
-    }
-    cursor = range.end;
-  }
-  output += content.slice(cursor);
-  return {
-    nextContent: output,
-    groups: Array.from(fragmentsById.values())
-      .map((group) => ({ ...group, ranges: normalizeTextRanges(group.ranges) }))
-      .sort((a, b) => a.ranges[0].start - b.ranges[0].start)
-  };
-}
-
-function rewriteMarkIdentity(markText: string, id: string, fragmentIndex: number): string {
-  let next = markText;
-  if (/data-ir-id="[^"]+"/.test(next)) {
-    next = next.replace(/data-ir-id="[^"]+"/, `data-ir-id="${id}"`);
-  } else {
-    next = next.replace("<mark", `<mark data-ir-id="${id}"`);
-  }
-  if (/data-ir-fragment="[^"]+"/.test(next)) {
-    next = next.replace(/data-ir-fragment="[^"]+"/, `data-ir-fragment="${fragmentIndex}"`);
-  } else {
-    next = next.replace("<mark", `<mark data-ir-fragment="${fragmentIndex}"`);
-  }
-  return next;
-}
-
-function rangesOverlap(a: TextRange, b: TextRange): boolean {
-  return a.start < b.end && b.start < a.end;
-}
-
-function normalizeTextRanges(ranges: TextRange[]): TextRange[] {
-  const sorted = ranges
-    .map((range) => ({ start: Math.max(0, range.start), end: Math.max(0, range.end) }))
-    .filter((range) => range.end > range.start)
-    .sort((a, b) => a.start - b.start || a.end - b.end);
-  const result: TextRange[] = [];
-  for (const range of sorted) {
-    const previous = result[result.length - 1];
-    if (previous && range.start <= previous.end) {
-      previous.end = Math.max(previous.end, range.end);
-    } else {
-      result.push({ ...range });
-    }
-  }
-  return result;
-}
-
-function getAnnotationVirtualRanges(annotation: AnnotationRecord): TextRange[] {
-  return LocalIrDocumentCore.recordRanges(annotation);
-}
-
-function sameTextRanges(a: TextRange[], b: TextRange[]): boolean {
-  return a.length === b.length && a.every((range, index) => range.start === b[index].start && range.end === b[index].end);
-}
-
-function findLastIndex<T>(items: T[], predicate: (item: T) => boolean): number {
-  for (let index = items.length - 1; index >= 0; index -= 1) {
-    if (predicate(items[index])) return index;
-  }
-  return -1;
-}
-
-function cloneAnnotation(annotation: AnnotationRecord): AnnotationRecord {
-  return {
-    ...annotation,
-    virtualRanges: annotation.virtualRanges.map((range) => ({ ...range })),
-    anchor: annotation.anchor ? { ...annotation.anchor, sectionPath: [...annotation.anchor.sectionPath] } : null,
-    fragments: annotation.fragments.map((fragment) => ({ ...fragment })),
-    headingPath: [...annotation.headingPath],
-    subtreeRange: annotation.subtreeRange ? { ...annotation.subtreeRange } : null
-  };
-}
-
-function createVirtualHighlightExtension(plugin: LocalIncrementalReadingPlugin) {
-  const historyShortcutExtension = Prec.highest(EditorView.domEventHandlers({
-    keydown(event, view) {
-      return plugin.handleVirtualHighlightUndoShortcut(view, event) || plugin.handleVirtualHighlightRedoShortcut(view, event);
-    }
-  }));
-  const decorationExtension = ViewPlugin.fromClass(class {
-    decorations: DecorationSet;
-
-    constructor(view: EditorView) {
-      this.decorations = buildVirtualHighlightDecorations(plugin, view);
-    }
-
-    update(update: ViewUpdate) {
-      const path = getEditorViewPath(update.view);
-      if (update.docChanged && path) {
-        plugin.mapVirtualRangesForEditorChange(path, update);
-      }
-      const shouldRefresh = update.docChanged ||
-        update.viewportChanged ||
-        update.transactions.some((transaction) => transaction.effects.some((effect) => effect.is(localIrRefreshEffect)));
-      if (shouldRefresh) {
-        this.decorations = buildVirtualHighlightDecorations(plugin, update.view);
-      }
-    }
-  }, {
-    decorations: (value) => value.decorations,
-    eventHandlers: {
-      click(event, view) {
-        const target = event.target instanceof HTMLElement ? event.target : null;
-        const mark = target?.closest("[data-ir-virtual-id]") as HTMLElement | null;
-        const id = mark?.getAttribute("data-ir-virtual-id");
-        const annotation = id ? plugin.settings.annotations[id] : null;
-        if (id && annotation && event.altKey) {
-          event.preventDefault();
-          plugin.queueManualMergeAnnotation(id);
-          view.focus();
-          return true;
-        }
-        if (isWholeBlockHighlightGesture(event, plugin.settings.processingModeEnabled)) {
-          event.preventDefault();
-          event.stopPropagation();
-          void plugin.highlightWholeBlockAtClick(view, event);
-          view.focus();
-          return true;
-        }
-        if (!id || !annotation) return false;
-        event.preventDefault();
-        plugin.openAnnotationModal(annotation);
-        view.focus();
-        return true;
-      }
-    }
-  });
-  return [historyShortcutExtension, decorationExtension];
-}
-
-function buildVirtualHighlightDecorations(plugin: LocalIncrementalReadingPlugin, view: EditorView): DecorationSet {
-  const builder = new RangeSetBuilder<Decoration>();
-  const path = getEditorViewPath(view);
-  if (!path) return builder.finish();
-  const docLength = view.state.doc.length;
-  const decorations = plugin.getAnnotationsForPath(path)
-    .filter((annotation) => annotation.renderMode === "virtual_decoration" && !annotation.orphaned)
-    .flatMap((annotation) => getAnnotationVirtualRanges(annotation).map((range) => ({ annotation, range })))
-    .sort((a, b) => a.range.start - b.range.start || a.range.end - b.range.end);
-  for (const { annotation, range } of decorations) {
-    const from = clampRangeIndex(range.start, docLength);
-    const to = clampRangeIndex(range.end, docLength);
-    if (to <= from) continue;
-    builder.add(from, to, Decoration.mark({
-      class: annotation.markKind === "cloze" ? "local-ir-virtual-cloze" : "local-ir-virtual-highlight",
-      attributes: {
-        "data-ir-virtual-id": annotation.id,
-        "data-ir-kind": annotation.markKind
-      }
-    }));
-  }
-  return builder.finish();
-}
-
-function getEditorViewPath(view: EditorView): string | null {
-  try {
-    const info = view.state.field(editorInfoField, false) as { file?: TFile } | null;
-    return info?.file?.path || null;
-  } catch {
-    return null;
-  }
-}
-
-function getCodeMirrorView(editor: Editor | null): EditorView | null {
-  const candidate = editor as unknown as { cm?: EditorView };
-  return candidate?.cm instanceof EditorView ? candidate.cm : null;
-}
-
-function roulette(records: DocRecord[]): DocRecord {
-  const weights = records.map((record) => Math.max(record.priority, 0.1));
-  const total = weights.reduce((sum, weight) => sum + weight, 0);
-  let cursor = Math.random() * total;
-
-  for (let i = 0; i < records.length; i += 1) {
-    cursor -= weights[i];
-    if (cursor <= 0) return records[i];
-  }
-
-  return records[records.length - 1];
-}
-
-function todayKey(): string {
-  return dateKey(new Date());
-}
-
-function dateKey(date: Date): string {
-  const year = date.getFullYear();
-  const month = String(date.getMonth() + 1).padStart(2, "0");
-  const day = String(date.getDate()).padStart(2, "0");
-  return `${year}-${month}-${day}`;
-}
-
-function addDaysKey(days: number): string {
-  const date = new Date();
-  date.setDate(date.getDate() + days);
-  return dateKey(date);
-}
-
-function isDateOnDay(value: string | null, day: string): boolean {
-  if (!value) return false;
-  const parsed = new Date(value);
-  if (Number.isNaN(parsed.getTime())) return value.startsWith(day);
-  return dateKey(parsed) === day;
-}
-
-function round(value: number): number {
-  return Math.round(value * 100) / 100;
-}
-
-function clamp(value: number, min: number, max: number): number {
-  return Math.min(max, Math.max(min, Number(value) || 0));
-}
-
-function normalizeMetrics(metrics: Partial<MetricValues> | undefined): MetricValues {
-  return {
-    importance: snapMetricValue(metrics?.importance ?? DEFAULT_METRICS.importance),
-    urgency: snapMetricValue(metrics?.urgency ?? DEFAULT_METRICS.urgency),
-    difficulty: snapMetricValue(metrics?.difficulty ?? DEFAULT_METRICS.difficulty),
-    interest: snapMetricValue(metrics?.interest ?? DEFAULT_METRICS.interest)
-  };
-}
-
-function captureAnnotationSnapshot(
-  annotations: Record<string, AnnotationRecord>,
-  ids: string[]
-): Record<string, AnnotationRecord | null> {
-  const snapshot: Record<string, AnnotationRecord | null> = {};
-  for (const id of ids.filter((item, index, array) => item && array.indexOf(item) === index)) {
-    snapshot[id] = annotations[id] ? cloneAnnotation(annotations[id]) : null;
-  }
-  return snapshot;
-}
-
-function calculatePriorityWithWeights(metrics: MetricValues, weights: MetricWeights): number {
-  const normalizedMetrics = normalizeMetrics(metrics);
-  const totalWeight = Object.values(weights).reduce((sum, weight) => sum + Number(weight || 0), 0);
-  if (totalWeight <= 0) return 0;
-
-  const score =
-    normalizedMetrics.importance * weights.importance +
-    normalizedMetrics.urgency * weights.urgency +
-    normalizedMetrics.difficulty * weights.difficulty +
-    normalizedMetrics.interest * weights.interest;
-
-  return round(score / totalWeight);
-}
-
-function normalizeRecord(path: string, raw: unknown, weights: MetricWeights): DocRecord {
-  const record = typeof raw === "object" && raw ? raw as Partial<DocRecord> : {};
-  const metrics = normalizeMetrics(record.metrics);
-  const status = normalizeStatus(record.status);
-  return {
-    path: record.path || path,
-    title: record.title || path.split("/").pop()?.replace(/\.md$/i, "") || path,
-    status,
-    metrics,
-    metricsEditedByUser: inferMetricsEditedByUser(metrics, record.metricsEditedByUser),
-    metricPresetCheckedMtime: Number.isFinite(record.metricPresetCheckedMtime) ? Number(record.metricPresetCheckedMtime) : null,
-    priority: calculatePriorityWithWeights(metrics, weights),
-    visitCount: Math.max(0, Math.round(Number(record.visitCount) || 0)),
-    lastVisited: record.lastVisited || null,
-    deferUntil: record.deferUntil || null,
-    archivedAt: record.archivedAt || null,
-    archiveExportPath: record.archiveExportPath || null,
-    archivePackagePath: record.archivePackagePath || null,
-    archivePackageId: record.archivePackageId || null,
-    archivePackageRevision: Number.isInteger(record.archivePackageRevision) ? record.archivePackageRevision! : null,
-    archiveInputHash: record.archiveInputHash || null,
-    exportPackageReadyAt: record.exportPackageReadyAt || null,
-    archiveAttemptCount: Math.max(0, Math.round(Number(record.archiveAttemptCount) || 0)),
-    archiveLastError: record.archiveLastError || null,
-    archiveLastFailure: normalizeArchiveFailureState(record.archiveLastFailure),
-    originalSourcePath: record.originalSourcePath || null,
-    archivedSourcePath: record.archivedSourcePath || null,
-    movedIntoReadingPoolFromPath: record.movedIntoReadingPoolFromPath || null,
-    movedIntoReadingPoolAt: record.movedIntoReadingPoolAt || null,
-    removedFromReadingPoolAt: record.removedFromReadingPoolAt || null,
-    removedToPath: record.removedToPath || null,
-    readingPathBeforeCompletion: record.readingPathBeforeCompletion || null,
-    completedSourcePath: record.completedSourcePath || null,
-    completedAt: record.completedAt || null,
-    documentStateSidecarPath: record.documentStateSidecarPath || null,
-    documentStateRevision: Number.isInteger(record.documentStateRevision) ? record.documentStateRevision! : null,
-    documentStateUpdatedAt: record.documentStateUpdatedAt || null,
-    documentStateFingerprint: record.documentStateFingerprint || null
-  };
-}
-
-function normalizeArchiveFailureState(value: unknown): ArchiveFailureState | null {
-  if (!value || typeof value !== "object") return null;
-  const raw = value as Partial<ArchiveFailureState>;
-  const errors = Array.isArray(raw.details?.errors)
-    ? raw.details!.errors.map((item) => String(item || "").replace(/[\r\n]+/g, " ").trim().slice(0, 500)).filter(Boolean).slice(0, 20)
-    : [];
-  return {
-    code: String(raw.code || "UNEXPECTED_ERROR").slice(0, 80),
-    kind: raw.kind === "blocked" ? "blocked" : "failed",
-    reasonCode: raw.reasonCode ? String(raw.reasonCode).slice(0, 80) : null,
-    message: String(raw.message || "Unknown batch archive package generation failure").replace(/[\r\n]+/g, " ").trim().slice(0, 500),
-    details: { errors },
-    retryable: raw.retryable !== false,
-    occurredAt: raw.occurredAt ? String(raw.occurredAt) : null
-  };
-}
-
-function normalizeReadingFolders(value: unknown, legacyFolder: unknown): string[] {
-  const legacy = normalizePath(String(legacyFolder || DEFAULT_FOLDER).trim() || DEFAULT_FOLDER);
-  const folders = Array.isArray(value)
-    ? value.map((item) => normalizePath(String(item || "").trim())).filter(Boolean)
-    : [];
-  return uniqueNormalizedPaths(folders.length > 0 ? folders : [legacy]);
-}
-
-function uniqueNormalizedPaths(paths: string[]): string[] {
-  const seen = new Set<string>();
-  const result: string[] = [];
-  for (const pathValue of paths) {
-    const normalized = normalizePath(String(pathValue || "").trim());
-    if (!normalized || seen.has(normalized)) continue;
-    seen.add(normalized);
-    result.push(normalized);
-  }
-  return result.length > 0 ? result : [DEFAULT_FOLDER];
-}
-
-function normalizeStatus(status: unknown): ReadingStatus {
-  return typeof status === "string" && VALID_STATUSES.has(status as ReadingStatus) ? status as ReadingStatus : "inbox";
-}
-
-function normalizeAnnotation(id: string, raw: unknown): AnnotationRecord {
-  const annotation = typeof raw === "object" && raw ? raw as Partial<AnnotationRecord> : {};
-  const now = new Date().toISOString();
-  const selectedText = annotation.selectedText || annotation.currentText || annotation.originalText || "";
-  const originalText = annotation.originalText || selectedText;
-  const currentText = annotation.currentText || selectedText;
-  const rewriteMarkdown = annotation.rewriteMarkdown || "";
-  return {
-    ...annotation,
-    id: annotation.id || id,
-    path: annotation.path || "",
-    selectedText: currentText,
-    sourceFormat: normalizeSourceFormat(annotation.sourceFormat),
-    renderMode: normalizeAnnotationRenderMode(annotation.renderMode, annotation.sourceFormat),
-    protectedKind: normalizeProtectedKind(annotation.protectedKind),
-    markKind: normalizeMarkKind(annotation.markKind),
-    originalText,
-    currentText,
-    type: normalizeAnnotationType(annotation.type),
-    commentMarkdown: annotation.commentMarkdown || "",
-    rewriteMarkdown,
-    hasRewrite: Boolean(annotation.hasRewrite || rewriteMarkdown.trim()),
-    rewriteApplied: Boolean(annotation.rewriteApplied),
-    orphaned: Boolean(annotation.orphaned),
-    lastKnownPath: annotation.lastKnownPath || annotation.path || "",
-    sourceOffset: typeof annotation.sourceOffset === "number" ? annotation.sourceOffset : null,
-    range: normalizeTextRange(annotation.range),
-    virtualRanges: LocalIrDocumentCore.recordRanges(annotation),
-    lineRange: normalizeLineRange(annotation.lineRange),
-    anchor: normalizeAnnotationAnchor(annotation.anchor),
-    fragments: normalizeAnnotationFragments(annotation.fragments, currentText),
-    scope: normalizeHierarchyScope(annotation.scope),
-    headingPath: Array.isArray(annotation.headingPath) ? annotation.headingPath.map(String).filter(Boolean) : [],
-    expandedText: String(annotation.expandedText || currentText),
-    expandedAnswerText: String(annotation.expandedAnswerText || annotation.expandedText || currentText),
-    subtreeRange: normalizeTextRange(annotation.subtreeRange),
-    createdAt: annotation.createdAt || now,
-    updatedAt: annotation.updatedAt || annotation.createdAt || now,
-    archived: Boolean(annotation.archived)
-  };
-}
-
-function normalizeQaCard(id: string, raw: unknown): QaCardRecord {
-  const card = typeof raw === "object" && raw ? raw as Partial<QaCardRecord> : {};
-  const now = new Date().toISOString();
-  const questionMarkdown = String(card.questionMarkdown || "");
-  const answerMarkdown = String(card.answerMarkdown || "");
-  return {
-    id: card.id || id,
-    path: card.path || "",
-    source: card.source === "annotation" ? "annotation" : "article",
-    sourceAnnotationId: card.sourceAnnotationId || null,
-    questionMarkdown,
-    answerMarkdown,
-    answerSourceText: String(card.answerSourceText || ""),
-    needsQuestionGeneration: Boolean(card.needsQuestionGeneration || !questionMarkdown.trim()),
-    needsAnswerGeneration: Boolean(card.needsAnswerGeneration || !answerMarkdown.trim()),
-    createdAt: card.createdAt || now,
-    updatedAt: card.updatedAt || card.createdAt || now,
-    archived: Boolean(card.archived)
-  };
-}
-
-function normalizeArticleMusing(id: string, raw: unknown): ArticleMusingRecord {
-  const musing = typeof raw === "object" && raw ? raw as Partial<ArticleMusingRecord> : {};
-  const now = new Date().toISOString();
-  return {
-    id: musing.id || createMusingId(),
-    path: musing.path || id,
-    bodyMarkdown: String(musing.bodyMarkdown || ""),
-    aiStatus: normalizeMusingAiStatus(musing.aiStatus),
-    createdAt: musing.createdAt || now,
-    updatedAt: musing.updatedAt || musing.createdAt || now,
-    archived: Boolean(musing.archived)
-  };
-}
-
-function normalizePendingImports(raw: unknown): PendingImportRecord[] {
-  if (!Array.isArray(raw)) return [];
-  const seen = new Set<string>();
-  const result: PendingImportRecord[] = [];
-  const now = new Date().toISOString();
-
-  for (const value of raw) {
-    const item = typeof value === "object" && value ? value as Partial<PendingImportRecord> : {};
-    const rawUrl = normalizeExternalUrl(item.url || item.normalizedUrl || "");
-    const normalizedUrl = normalizePendingImportUrl(rawUrl || "");
-    if (!rawUrl || !normalizedUrl || seen.has(normalizedUrl)) continue;
-    seen.add(normalizedUrl);
-    const wasInterrupted = item.status === "importing";
-    const brokerClientRequestId = String(item.brokerClientRequestId || "").trim() || null;
-    result.push({
-      id: item.id || `pending-import-${shortHash(normalizedUrl)}`,
-      url: rawUrl,
-      normalizedUrl,
-      sourcePath: item.sourcePath ? normalizePath(String(item.sourcePath)) : null,
-      status: item.status === "failed" ? "failed" : wasInterrupted && brokerClientRequestId ? "importing" : "pending",
-      addedAt: item.addedAt || now,
-      updatedAt: item.updatedAt || item.addedAt || now,
-      lastAttemptAt: item.lastAttemptAt || null,
-      attemptCount: Math.max(0, Math.round(Number(item.attemptCount) || 0)),
-      lastError: item.lastError || (wasInterrupted && !brokerClientRequestId ? "上次导入未确认完成，请重试。" : null),
-      brokerClientRequestId
-    });
-  }
-
-  return result;
-}
-
-function normalizeMusingAiStatus(value: unknown): ArticleMusingAiStatus {
-  return value === "resolved" || value === "skipped" ? value : "pending";
-}
-
-function trimTrailingUrlPunctuation(value: string): string {
-  let candidate = String(value || "").trim().replace(/[.,;:!?，。；：！？、]+$/g, "");
-  for (const [opening, closing] of [["(", ")"], ["[", "]"], ["{", "}"], ["（", "）"], ["【", "】"], ["「", "」"], ["《", "》"]]) {
-    while (candidate.endsWith(closing)) {
-      const openings = candidate.split(opening).length - 1;
-      const closings = candidate.split(closing).length - 1;
-      if (closings <= openings) break;
-      candidate = candidate.slice(0, -1);
-    }
-  }
-  return candidate;
-}
-
-function parseExternalUrlCandidate(value: string): string | null {
-  try {
-    const url = new URL(trimTrailingUrlPunctuation(value));
-    if (url.protocol !== "http:" && url.protocol !== "https:") return null;
-    url.hash = "";
-    return url.toString();
-  } catch {
-    return null;
-  }
-}
-
-function canonicalizePendingImportUrl(value: string): string | null {
-  try {
-    const url = new URL(value);
-    const trackingKeys: string[] = [];
-    url.searchParams.forEach((_value, key) => {
-      if (/^utm_/i.test(key) || /^(fbclid|gclid|mc_cid|mc_eid)$/i.test(key)) trackingKeys.push(key);
-    });
-    trackingKeys.forEach((key) => url.searchParams.delete(key));
-    url.searchParams.sort();
-    if (url.pathname.length > 1) url.pathname = url.pathname.replace(/\/+$/, "");
-    return url.toString();
-  } catch {
-    return null;
-  }
-}
-
-function extractExternalUrls(value: string): string[] {
-  const matches = String(value || "").match(/https?:\/\/[^\s<>"']+/gi) || [];
-  const seen = new Set<string>();
-  const urls: string[] = [];
-  for (const match of matches) {
-    const normalized = parseExternalUrlCandidate(match);
-    if (!normalized) continue;
-    const dedupeKey = canonicalizePendingImportUrl(normalized) || normalized;
-    if (seen.has(dedupeKey)) continue;
-    seen.add(dedupeKey);
-    urls.push(normalized);
-  }
-  return urls;
-}
-
-function normalizeExternalUrl(value: string): string | null {
-  return parseExternalUrlCandidate(value) || extractExternalUrls(value)[0] || null;
-}
-
-function normalizePendingImportUrl(value: string): string | null {
-  const normalized = normalizeExternalUrl(value);
-  return normalized ? canonicalizePendingImportUrl(normalized) : null;
-}
-
-function normalizeHierarchyScope(value: unknown): HierarchyScope {
-  return value === "heading_subtree" || value === "list_subtree" ? value : "selection";
-}
-
-function normalizeTextRange(value: unknown): TextRange | null {
-  if (!value || typeof value !== "object") return null;
-  const range = value as Partial<TextRange>;
-  if (typeof range.start !== "number" || typeof range.end !== "number") return null;
-  if (range.end < range.start) return null;
-  return { start: range.start, end: range.end };
-}
-
-function normalizeLineRange(value: unknown): LineRange | null {
-  if (!value || typeof value !== "object") return null;
-  const range = value as Partial<LineRange>;
-  if (typeof range.startLine !== "number" || typeof range.endLine !== "number") return null;
-  if (range.endLine < range.startLine) return null;
-  return { startLine: Math.max(0, Math.round(range.startLine)), endLine: Math.max(0, Math.round(range.endLine)) };
-}
-
-function normalizeAnnotationType(type: unknown): AnnotationType {
-  return typeof type === "string" && VALID_ANNOTATION_TYPES.has(type as AnnotationType) ? type as AnnotationType : "highlight";
-}
-
-function normalizeModalAnnotationType(type: unknown): AnnotationType {
-  return typeof type === "string" && ANNOTATION_MODAL_TYPES.includes(type as AnnotationType) ? type as AnnotationType : "comment";
-}
-
-function normalizeSourceFormat(sourceFormat: unknown): AnnotationSourceFormat {
-  if (sourceFormat === "virtual") return "virtual";
-  return sourceFormat === "legacy" ? "legacy" : "mark";
-}
-
-function normalizeAnnotationRenderMode(renderMode: unknown, sourceFormat?: unknown): AnnotationRenderMode {
-  if (renderMode === "virtual_decoration" || sourceFormat === "virtual") return "virtual_decoration";
-  return "inline_mark";
-}
-
-function normalizeProtectedKind(value: unknown): ProtectedKind | null {
-  return value === "html_block" ||
-    value === "style_block" ||
-    value === "code_fence" ||
-    value === "math_block" ||
-    value === "link" ||
-    value === "image" ||
-    value === "mixed"
-    ? value
-    : null;
-}
-
-function normalizeMarkKind(markKind: unknown): AnnotationMarkKind {
-  return markKind === "cloze" ? "cloze" : "highlight";
-}
-
-function normalizeAnnotationAnchor(value: unknown): AnnotationAnchor | null {
-  if (!value || typeof value !== "object") return null;
-  const anchor = value as Partial<AnnotationAnchor>;
-  return {
-    ...anchor,
-    sectionPath: Array.isArray(anchor.sectionPath) ? anchor.sectionPath.map(String) : [],
-    paragraphIndex: typeof anchor.paragraphIndex === "number" ? anchor.paragraphIndex : null,
-    sourceOffset: typeof anchor.sourceOffset === "number" ? anchor.sourceOffset : null,
-    contextBefore: String(anchor.contextBefore || ""),
-    contextAfter: String(anchor.contextAfter || ""),
-    contextHash: String(anchor.contextHash || ""),
-    fragmentCount: Math.max(1, Math.round(Number(anchor.fragmentCount) || 1)),
-    crossedBlankLines: Boolean(anchor.crossedBlankLines)
-  };
-}
-
-function normalizeAnnotationFragments(value: unknown, fallbackText: string): AnnotationFragment[] {
-  if (Array.isArray(value)) {
-    const fragments = value
-      .map((item, index) => {
-        const fragment = item as Partial<AnnotationFragment>;
-        return {
-          ...fragment,
-          index: typeof fragment.index === "number" ? fragment.index : index,
-          text: String(fragment.text || "")
-        };
-      })
-      .filter((fragment) => fragment.text.trim());
-    if (fragments.length > 0) return fragments;
-  }
-  return createWrappedHighlightText("normalizer", fallbackText).fragments.map((fragment) => ({
-    index: fragment.index,
-    text: fragment.text
-  }));
-}
-
-function annotationTemplate(type: AnnotationType): string {
-  switch (type) {
-    case "comment":
-      return "- 评论：";
-    case "myth_truth":
-      return "- 迷思：\n- 真相：";
-    case "rebuttal":
-      return "- 对方观点：\n- 问题：\n- 反驳：";
-    case "sample_quote":
-      return "- 用途：sample / 引用\n- 可复用点：";
-    case "later":
-      return "- 稍后处理原因：";
-    case "rewrite":
-      return "- 改写目标：";
-    case "refine":
-      return "- 精炼原则：";
-    case "add_viewpoint":
-      return "- 原论述可取处：\n- 我补充的观点：";
-    case "rebuttal_rewrite":
-      return "- 原论述问题：\n- 修正后的论述方向：";
-    case "question":
-      return "- 问题：\n- 暂定理解：\n- 相关概念：\n- 希望后续回答的方向：";
-    case "optimize":
-      return "- 原内容不足：\n- 补充说明：\n- 可优化表达：";
-    case "example_viewpoint":
-      return "- 观点：";
-    case "qa_card":
-      return "- 问题：\n- 备注：";
-    case "highlight":
-    default:
-      return "";
-  }
-}
-
-function resolveQaQuestion(annotation: ArchiveAnnotationPayload): string {
-  const fromComment = extractQuestionFromComment(annotation.commentMarkdown);
-  if (fromComment) return fromComment;
-  const heading = annotation.headingPath[annotation.headingPath.length - 1] || "";
-  if (annotation.scope === "heading_subtree" && isLikelyQuestion(heading)) return heading;
-  const current = stripIrMarkup(annotation.currentText || "").trim();
-  if (isLikelyQuestion(current)) return current;
-  return "";
-}
-
-function shouldCreateQaCardFromAnnotation(annotation: ArchiveAnnotationPayload): boolean {
-  if (annotation.type === "qa_card") return true;
-  if (annotation.type === "question") return false;
-  const heading = annotation.headingPath[annotation.headingPath.length - 1] || annotation.currentText;
-  return annotation.scope === "heading_subtree" && isLikelyQuestion(heading);
-}
-
-function extractQuestionFromComment(value: string): string {
-  const text = String(value || "").trim();
-  if (!text) return "";
-  const lines = text.split(/\r?\n/).map((line) => line.trim()).filter(Boolean);
-  for (const line of lines) {
-    const match = /^-?\s*(?:问题|Q|Question)\s*[:：]\s*(.+?)\s*$/.exec(line);
-    if (match?.[1]) return match[1].trim();
-  }
-  const meaningful = lines.filter((line) => !/^-?\s*备注\s*[:：]?\s*$/i.test(line));
-  if (meaningful.length === 1 && !/^-\s*(问题|备注)\s*[:：]?\s*$/i.test(meaningful[0])) {
-    return meaningful[0].replace(/^-\s*/, "").trim();
-  }
-  return "";
-}
-
-function isLikelyQuestion(value: string): boolean {
-  const text = stripIrMarkup(value).replace(/^#+\s*/, "").trim();
-  if (!text) return false;
-  return /[?？]$/.test(text) || /^(什么|为何|为什么|如何|怎么|怎样|哪些|是否|能否|何以|Where|What|Why|How|When|Which|Can|Could|Should|Is|Are)\b/i.test(text);
-}
-
-function renderRemNoteMultiLineCard(question: string, answer: string): string {
-  const q = stripIrMarkup(question).replace(/\s+/g, " ").trim() || "待生成问题";
-  const answerLines = renderCardAnswerLines(answer);
-  return [`- ${q} >>>`, ...answerLines].join("\n");
-}
-
-function renderClozeMarkdown(contextText: string, answerText: string): string {
-  const context = stripIrMarkup(contextText).trim();
-  const answer = stripIrMarkup(answerText).trim();
-  if (!answer) return context;
-  const cloze = `{{${answer}}}`;
-  if (!context) return cloze;
-  const index = context.indexOf(answer);
-  if (index >= 0) {
-    return `${context.slice(0, index)}${cloze}${context.slice(index + answer.length)}`;
-  }
-  return `${context}\n\n挖空：${cloze}`;
-}
-
-function renderQaCardPreview(card: QaCardRecord): string {
-  return renderRemNoteMultiLineCard(
-    card.questionMarkdown || "待生成问题",
-    card.answerMarkdown || card.answerSourceText || "待生成答案"
-  );
-}
-
-function renderCardAnswerLines(answer: string): string[] {
-  const lines = stripIrMarkup(answer).split(/\r?\n/).map((line) => line.trim()).filter(Boolean);
-  if (lines.length === 0) return ["    - 待生成答案"];
-  return lines.map((line) => `    - ${line.replace(/^[-*+]\s+/, "")}`);
-}
-
-function createQaCardId(): string {
-  return `ir-card-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
-}
-
-function createMusingId(): string {
-  return `ir-musing-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
-}
-
-function createAnnotationId(): string {
-  return `ir-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
-}
-
-function sanitizeFileName(value: string): string {
-  return (value || "untitled")
-    .replace(/[<>:"/\\|?*\x00-\x1F]/g, "-")
-    .replace(/\s+/g, " ")
-    .trim()
-    .slice(0, 80) || "untitled";
-}
-
-function shortHash(value: string): string {
-  let hash = 0;
-  for (let i = 0; i < value.length; i += 1) {
-    hash = (hash * 31 + value.charCodeAt(i)) >>> 0;
-  }
-  return hash.toString(36);
-}
-
-function blockquote(value: string): string {
-  return value.split(/\r?\n/).map((line) => `> ${line}`).join("\n");
-}
-
-function escapeYaml(value: string): string {
-  return value.replace(/\\/g, "\\\\").replace(/"/g, "\\\"");
-}
-
-function truncate(value: string, length: number): string {
-  const normalized = value.replace(/\s+/g, " ").trim();
-  if (normalized.length <= length) return normalized;
-  return `${normalized.slice(0, length - 1)}…`;
-}
-
-function isSubstantiveAnnotation(annotation: AnnotationRecord): boolean {
-  return Boolean(
-    annotation.commentMarkdown.trim() ||
-    annotation.rewriteMarkdown.trim() ||
-    annotation.hasRewrite ||
-    annotation.rewriteApplied
-  );
-}
-
-function getAnnotationRoute(annotation: AnnotationRecord): AnnotationRoute {
-  if (annotation.type === "qa_card") return "remnote_card";
-  if (annotation.type === "question") return "codex_question_queue";
-  if (isSubstantiveAnnotation(annotation)) return "remnote";
-  return "refined_reading";
-}
-
-function getRemNoteTargetDocument(annotation: AnnotationRecord): string {
-  if (annotation.type === "myth_truth") return "迷思 / 真相";
-  if (annotation.type === "sample_quote") return "引用";
-  if (annotation.type === "add_viewpoint") return "联想";
-  if (annotation.type === "optimize") return "优化";
-  if (annotation.type === "example_viewpoint") return "例子与观点";
-  return "普通评论";
-}
-
-function hasAnnotationWork(annotation: AnnotationRecord): boolean {
-  return Boolean(
-    annotation.commentMarkdown.trim() ||
-    annotation.rewriteMarkdown.trim() ||
-    annotation.hasRewrite ||
-    annotation.rewriteApplied ||
-    annotation.type !== "highlight" ||
-    annotation.archived
-  );
-}
-
-function scanLegacyHighlights(path: string, content: string): LegacyHighlight[] {
-  const highlights: LegacyHighlight[] = [];
-  const regex = /==([\s\S]*?)==/g;
-  let match: RegExpExecArray | null;
-  while ((match = regex.exec(content)) !== null) {
-    const text = match[1];
-    if (!text.trim()) continue;
-    if (match.index > 0 && content[match.index - 1] === "=") continue;
-    if (content[match.index + match[0].length] === "=") continue;
-    highlights.push({
-      id: `legacy-${shortHash(path)}-${match.index}`,
-      path,
-      text,
-      startOffset: match.index,
-      endOffset: match.index + match[0].length
-    });
-  }
-  return highlights;
-}
-
-function replaceMarkInnerText(content: string, id: string, nextText: string): string {
-  const regex = new RegExp(`(<mark\\b(?=[^>]*data-ir-id="${escapeRegExp(id)}")[^>]*>)([\\s\\S]*?)(<\\/mark>)`);
-  return content.replace(regex, (_match, open: string, _inner: string, close: string) => `${open}${nextText}${close}`);
-}
-
-function hasMarkId(content: string, id: string): boolean {
-  return new RegExp(`<mark\\b(?=[^>]*data-ir-id="${escapeRegExp(id)}")[^>]*>`).test(content);
-}
-
-function findSearchOffset(content: string, search: string, expectedOffset?: number | null): number {
-  if (typeof expectedOffset === "number" && content.slice(expectedOffset, expectedOffset + search.length) === search) {
-    return expectedOffset;
-  }
-  return content.indexOf(search);
-}
-
-function escapeRegExp(value: string): string {
-  return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 }

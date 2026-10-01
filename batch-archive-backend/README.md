@@ -1,6 +1,6 @@
 # Local IR Batch Archive Backend
 
-这是 Obsidian Local IR 的独立批量归档生产者后端。正式 Thread：`01a02885-fca5-7112-a511-0bda8ff273f7`。
+这是 Obsidian Local IR 的独立批量归档生产者后端，当前模块版本 `1.4.0`。本轮插件优化未改动生产者合同或并发策略。
 
 ## 边界
 
@@ -21,9 +21,11 @@ npm run batch-archive:diagnose:production
 npm run build
 ```
 
-`batch-archive:canary:real` 只在明确授权后使用。它读取已安装插件的 `data.json` 和待归档原文，确定性选择最多 12 篇丰富度较高的记录，把正文副本和全部输出重定向到 `%LOCALAPPDATA%/LocalIRCanary/batch-archive-backend/<run-id>/`，并使用正式插件的 `createBatchArchiveInput` 与后端 `runBatchArchive({ concurrency: "auto" })`。正式队列、插件数据和原文均为只读；执行前后哈希不一致时 Canary fail closed。归一化后没有 RemNote import item 的文章只有在收到显式确认对象后才可生成；refined/question dispositions 原样保留。
+`batch-archive:canary:real` 只在明确授权后使用，并要求显式设置绝对路径 `LOCAL_IR_VAULT`。它读取已安装插件的 `data.json` 和待归档原文，确定性选择 12 篇丰富度较高的记录，把正文副本和全部输出重定向到 `D:\Artifacts\ObsidianLocalIR\private-canaries\<run-id>`，并使用正式插件的 `createBatchArchiveInput` 与后端 `runBatchArchive({ concurrency: "auto" })`。正式队列、插件数据和原文均为只读；执行前后哈希不一致时 Canary fail closed。归一化后没有 RemNote import item 的文章只有在收到显式确认对象后才可生成；refined/question dispositions 原样保留。
 
-`batch-archive:canary:button` 调用已部署构建中的真实 `batchArchiveDoneRecords` 按钮处理器，把取消与确认两条路径的全部输出隔离到 `%LOCALAPPDATA%/LocalIRCanary/`。它不会写生产 `data.json` 或正式队列；回执会明确区分按钮处理器验证与真实 Obsidian 可视 Modal 点击。
+`batch-archive:canary:button` 调用已部署构建中的真实 `batchArchiveDoneRecords` 按钮处理器，把取消与确认两条路径的全部输出隔离到 `D:\Artifacts\ObsidianLocalIR\private-canaries`。它不会写生产 `data.json` 或正式队列；回执会明确区分按钮处理器验证与真实 Obsidian 可视 Modal 点击。此脚本与 `diagnose:production` 保留了原“7 篇特定失败”的前置条件，仅用于历史诊断，不属于通用回归测试。
+
+离线合成 Canary 每次在 `D:\Artifacts\ObsidianLocalIR\canaries` 新建独立目录，不清空旧结果。所有 Canary 回执和生产诊断均不写回源码仓库。
 
 运行时入口：Obsidian `local-ir` 单篇按钮调用 `prepareExportPackage`，批量按钮调用 `runBatchArchive({ concurrency: "auto" })`。`auto` 把本轮每个独立候选分配到一条异步任务通道，不设固定路数；例如 12 篇即 12 路。调用方仍可传正整数临时限流。无论实际完成顺序如何，输出结果都按候选路径确定排序。工程 Thread 不参与日常运行。
 
@@ -43,4 +45,4 @@ npm run build
 
 ## 发布与回滚
 
-`release.json` 是模块发布状态。构建前的已部署 `main.js/manifest.json/styles.css` 必须复制到 `batch-archive-backend/releases/<旧版本>/`；回滚只恢复插件构建文件，保留队列、快照和 receipt 作为审计材料。
+插件 `npm run deploy -- --vault <绝对路径>` 会保存旧 `main.js/manifest.json/styles.css` 至 D 盘部署产物目录，再写入新版本并核验哈希。Git 与 `CHANGELOG.md` 保存源码版本；回滚只恢复运行文件，保留 data.json、原文、队列、快照和 receipt，不复制长期源码版本目录。

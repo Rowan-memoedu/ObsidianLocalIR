@@ -1,10 +1,11 @@
 import assert from "node:assert/strict";
+import { readPluginSource } from "./plugin-source.mjs";
 import fs from "node:fs/promises";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 
 const testDir = path.dirname(fileURLToPath(import.meta.url));
-const source = await fs.readFile(path.join(testDir, "..", "main.ts"), "utf8");
+const source = readPluginSource();
 
 assert.ok(source.includes("/api/browser-import/requests"), "Obsidian must submit URL work through the import-request interface");
 assert.ok(source.includes("/api/browser-import/requests/${encodeURIComponent(created.request_id)}"), "Obsidian must poll the request receipt");

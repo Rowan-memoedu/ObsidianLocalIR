@@ -4,14 +4,17 @@ Obsidian 桌面端本地渐进阅读插件。它负责把已经整理好的 Mark
 
 ## 当前版本
 
-- 插件版本：`0.8.7`
+- 插件版本：`0.9.0`
 - 插件 ID：`local-ir`
 - 安装目录：`.obsidian/plugins/local-ir/`
-- 默认阅读池：`04 Projects/渐进阅读工作流/阅读区`
+- 初次安装默认阅读池：`00 Inbox/IR 工作台/00 原文队列`；已有安装保留自己的 `readingFolders`，不会被默认值覆盖。
 - 默认导出队列：`04 Projects/渐进阅读工作流/RemNote 导出队列`
 - 默认待归档原文目录：`04 Projects/渐进阅读工作流/待归档原文`
 - 默认已归档原文目录：`04 Projects/渐进阅读工作流/已归档原文`
 - 默认移出阅读池目录：`04 Projects/渐进阅读工作流/移出阅读池`
+
+实现职责、开发意图、差异修复与验证范围统一见 [实现机制与意图对照](docs/ARCHITECTURE.md)。
+唯一活动源码为 `D:\Projects\ObsidianLocalIR`；旧工作区入口仅为兼容 junction。
 
 ## 核心工作流
 
@@ -45,10 +48,10 @@ Obsidian 桌面端本地渐进阅读插件。它负责把已经整理好的 Mark
 
 ```text
 阅读区/浏览器高亮/文章.md
-.local-ir/browser-document-state/文章.md.browser-ir.json
+.local-ir/browser-document-state/文章.md--路径哈希.browser-ir.json
 ```
 
-浏览器文本坐标在保存时会重新锚定到最终 Markdown。Local IR 首次读取旧的相邻 sidecar 时会把它迁移到内部状态目录并重新锚定；无法可靠定位的标注保留内容并标记为 orphan，不会把错误坐标写入正文。导入后，本地修改会递增 sidecar revision 并原子回写，因此可以在 Obsidian 中从浏览器保存点继续加工。
+新迁移的状态文件使用完整 Markdown 路径的哈希区分同名文章；已有平铺 sidecar 仍兼容，但读取前必须核对 `document.path`。移动文档时保留已核验的 sidecar 文件身份，并同步其内部路径。浏览器文本坐标在保存时会重新锚定到最终 Markdown；无法可靠定位的标注保留内容并标记为 orphan，不会把错误坐标写入正文。导入后，本地修改会递增 sidecar revision 并原子回写，因此可以在 Obsidian 中从浏览器保存点继续加工。
 
 待导入列表顶部提供批量链接输入框，可从混合文字、换行和 Markdown 链接中识别多个 `http/https` URL，去除常见追踪参数后去重。点击“标准导入链接”后，Obsidian 向本地共享接口 `POST /api/browser-import/requests` 提交 URL，通过 `GET /api/browser-import/requests/:requestId` 查询逐条回执。本地后端以 `background_fetch` 采集并统一执行标准预处理、质量校验、Markdown 落盘与状态保存；常规路径不再依赖扩展领取任务或打开临时抓取标签页。成功条目从列表移除，质量警告保持可见，失败条目保留原因和重试入口；HTTP 202 只表示受理，登录或 JS 渲染要求不能冒充成功。计划中的简洁网页导入页复用同一后端，并对齐此处的链接输入行为。
 
@@ -79,6 +82,7 @@ Obsidian 桌面端本地渐进阅读插件。它负责把已经整理好的 Mark
 - 打开不在阅读池里的 Markdown 并进行加工时，插件会自动把它移入第一阅读池，不再弹窗阻断。
 - `当前文件夹加入阅读池` 只追加文件夹，不覆盖已有阅读池。
 - `当前文件移出阅读池` 会优先把自动移入的文件移回原路径；没有原路径记录时，放到 `移出阅读池`。
+- 移除阅读池配置或索引暂时缺失不再清除文章加工数据；这类记录保留，但不参与“继续阅读”。
 
 ## 加工模式
 
@@ -88,7 +92,7 @@ Obsidian 桌面端本地渐进阅读插件。它负责把已经整理好的 Mark
 <mark data-ir-id="...">文本</mark>
 ```
 
-加工内容保存在插件数据中，不把长评论写回原文 Markdown。普通正文默认只保留轻量标记。
+加工内容保存在插件数据中，不把长评论写回原文 Markdown。只有关闭“全部虚拟高亮”并采用经典模式时，普通正文才使用上面的轻量标记。
 
 如果选区触及代码块、HTML 块、`<style>`、公式块、图片或链接，插件会改用“特殊格式高亮”：不向原文写入 `<mark>`，只保存插件数据，并通过编辑器装饰层显示高亮，避免破坏 Markdown 渲染。
 
@@ -120,7 +124,7 @@ Obsidian 桌面端本地渐进阅读插件。它负责把已经整理好的 Mark
 
 ## 挖空模式
 
-`挖空模式` 和加工模式互斥，选中文本会生成：
+`挖空模式` 和加工模式互斥。默认仍是虚拟挖空；关闭“全部虚拟高亮”且选区不含受保护格式时，经典模式才生成：
 
 ```html
 <mark data-ir-id="..." data-ir-kind="cloze">文本</mark>
@@ -164,27 +168,39 @@ Obsidian 内只显示为另一种高亮样式；归档 JSON 会生成 `clozeCard
 
 原始 Markdown 在工程五成功 receipt 前始终留在 `待归档原文`。`已归档原文` 只是 package 中声明的最终目标路径，本模块不会执行移动。
 
-独立模块合同、schema、测试、release 与回滚说明见 `batch-archive-backend/README.md` 和 `batch-archive-backend/release.json`。
+独立模块合同、schema 与测试见 [batch-archive-backend/README.md](batch-archive-backend/README.md)。版本变化由 Git 历史和 `CHANGELOG.md` 维护；运行文件回滚副本不进入源码仓库。
 
 ## 开发与安装
 
 ```powershell
-npm install
-npm run batch-archive:check
+Set-Location D:\Projects\ObsidianLocalIR
+npm ci --cache D:\Caches\npm
+npm test
+npm run check
 npm run batch-archive:canary
-npx tsc --noEmit
 npm run build
 ```
 
-构建会复制到：
+依赖同级 `D:\Projects\渐进阅读工作流\document-core`；正式归档 schema/验证器的测试也依赖该项目。它们是外部已有工程，本仓库不复制或修改其实现。
 
-```text
-.obsidian/plugins/local-ir/
+构建只输出到 `D:\Artifacts\ObsidianLocalIR\build`，不会部署。需要部署时显式指定 Vault：
+
+```powershell
+npm run deploy -- --vault 'D:\Workspaces\新建文件夹'
+$env:LOCAL_IR_VAULT = 'D:\Workspaces\新建文件夹'
+npm run native:canary
 ```
+
+部署只替换 `main.js / manifest.json / styles.css`，校验 SHA-256，旧运行文件及回执进入 `D:\Artifacts\ObsidianLocalIR\deployments`。不修改 `data.json`，不自动重载插件；安装版本和运行中版本要分别核验。
+
+`native:canary` 要求 Obsidian 已运行且当前 Vault 与显式路径一致。它通过官方 CLI 在真实 DOM 中运行隔离合成材料，核验正文零写入、当前文件/选区不变、生产数据哈希不变；不点击界面，不重启应用，不触发真实导入。
+
+可用 `LOCAL_IR_BUILD_DIR / LOCAL_IR_ARTIFACT_DIR` 显式改写产物位置。私密材料 Canary 必须另行按其说明使用，不属于默认测试；历史“7 篇失败材料”脚本仍只适用于原诊断场景，不能作为通用验收。
 
 ## 维护规则
 
 - 每次功能变化必须同步更新 README。
 - 每次版本变化必须更新 `CHANGELOG.md`。
-- 每次代码修改后必须运行 `tsc --noEmit` 和 `npm run build`。
-- 涉及 RemNote 队列脚本时必须运行 `node --check import-remnote-queue.mjs`。
+- 每次代码修改后必须运行 `npm test`、`npm run check` 和 `npm run build`。
+- 涉及共享核心适配时，设置 `LOCAL_IR_OBSIDIAN_SOURCE` 为本仓库，再运行同级 `document-core/adapters.test.mjs` 与 `handoff.test.mjs`。
+- 不把“导出包已准备”视为 RemNote 已写入，不为本地插件优化自动增加正式归档或网络导入验收。
