@@ -2,7 +2,6 @@
 
 协作开发、Agent 提交与合并规则见 [CONTRIBUTING.md](CONTRIBUTING.md)。
 
-
 Obsidian 桌面端本地渐进阅读插件。它负责把已经整理好的 Markdown 放入本地阅读队列，支持低摩擦高亮加工、挖空标注、文章问答卡、文章随想，并把完成阅读的文章批量生成 RemNote 导出队列。
 
 ## 当前版本
