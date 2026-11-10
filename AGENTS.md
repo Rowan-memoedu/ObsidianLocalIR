@@ -2,7 +2,6 @@
 
 - 代码提交、PR 合并、同步与共享边界遵守 [CONTRIBUTING.md](CONTRIBUTING.md)。历史任务授权、私人账号及生产数据权限不随源码共享转移给其他成员或 Agent。
 
-
 - 唯一活动源码：`D:\Projects\ObsidianLocalIR`；`main` 跟踪独立私有仓库的 `origin/main`。旧工作区路径只是 junction，不建立第二份源码或 worktree。
 - 机制与意图权威说明：`docs/ARCHITECTURE.md`；操作说明：`README.md`；历史变化：`CHANGELOG.md`。
 - 本项目负责 Obsidian 本地阅读、加工与导出包。网络抓取、浏览器扩展和 RemNote 正式导入属于其他工程，不因局部优化扩大范围。
